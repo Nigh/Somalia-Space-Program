@@ -2,6 +2,7 @@ extends RigidBody2D
 class_name CombatShip
 
 signal destroyed(ship: CombatShip)
+const PULSE_INTERVAL := 0.065
 
 var game: Node2D
 var player := false
@@ -22,6 +23,8 @@ var turn_input := 0.0
 var brake_input := false
 var fire_input := false
 var cooldowns: Dictionary = {}
+var pulse_remaining := 0
+var pulse_timer := 0.0
 var blink_cooldown := 0.0
 var emp_cooldown := 0.0
 var jump_charge := 0.0
@@ -35,6 +38,13 @@ var has_optical := true
 var has_radar := true
 var has_ir := true
 var has_fire_control := true
+var sentry := false
+var damage_multiplier := 1.0
+var beam_range := 760.0
+var fire_range := 720.0
+var beam_active := false
+var beam_direction := Vector2.UP
+var beam_length := 0.0
 
 
 func _ready() -> void:
@@ -42,6 +52,7 @@ func _ready() -> void:
 	gravity_scale = 0.0
 	linear_damp = 0.04
 	angular_damp = 2.0
+	can_sleep = false
 	contact_monitor = true
 	max_contacts_reported = 4
 	var shape := CircleShape2D.new()
@@ -56,9 +67,10 @@ func _ready() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	if hp <= 0.0:
+	beam_active = false
+	if hp <= 0.0 or game.state != "playing":
 		return
-	energy = minf(100.0, energy + (22.0 if energy < 25.0 else 14.0) * delta)
+	energy = minf(100.0, energy + (200.0 if sentry else 22.0 if energy < 25.0 else 14.0) * delta)
 	for key in heat.keys():
 		heat[key] = maxf(0.0, heat[key] - 18.0 * delta)
 		if heat[key] < 40.0:
@@ -82,10 +94,14 @@ func _physics_process(delta: float) -> void:
 	if brake_input:
 		apply_central_force(-linear_velocity * 20.0)
 	if module_ready("gyro"):
-		apply_torque(turn_input * 2500.0)
+		if player:
+			# Responsive assisted steering; gyro damage still disables the assist.
+			angular_velocity = move_toward(angular_velocity, turn_input * 4.5, 16.0 * delta)
+		else:
+			apply_torque(turn_input * 2500.0)
 	if linear_velocity.length() > 650.0:
 		apply_central_force(-linear_velocity.normalized() * 850.0)
-	if absf(angular_velocity) > 3.0:
+	if not player and absf(angular_velocity) > 3.0:
 		apply_torque(-signf(angular_velocity) * 1800.0)
 	if shield_on:
 		if not spend("shield", 7.0 * delta, 14.0 * delta):
@@ -93,9 +109,24 @@ func _physics_process(delta: float) -> void:
 	if stealth_on:
 		if not spend("stealth", 5.0 * delta, 2.0 * delta):
 			stealth_on = false
-	if fire_input and cooldowns.get(weapon, 0.0) <= 0.0:
-		game.fire_weapon(self)
+	if pulse_remaining > 0:
+		if weapon != "pulse" or not module_ready("weapons"):
+			pulse_remaining = 0
+		else:
+			pulse_timer -= delta
+			while pulse_timer <= 0.0 and pulse_remaining > 0:
+				game.fire_weapon(self, delta, true)
+				pulse_remaining -= 1
+				pulse_timer += PULSE_INTERVAL
+	elif fire_input and cooldowns.get(weapon, 0.0) <= 0.0:
+		game.fire_weapon(self, delta)
 	queue_redraw()
+
+
+func _integrate_forces(body: PhysicsDirectBodyState2D) -> void:
+	if game.wrap_enabled and not player and is_instance_valid(game.player):
+		var at: Vector2 = game.player.global_position
+		body.transform.origin = at + game.offset_to(at, body.transform.origin)
 
 
 func module_ready(module: String) -> bool:
@@ -151,6 +182,13 @@ func _ai(_delta: float) -> void:
 		fire_input = false
 		return
 	var offset: Vector2 = game.offset_to(global_position, ai_target.global_position)
+	if sentry:
+		thrust_input = 0.0
+		turn_input = 0.0
+		brake_input = true
+		rotation = offset.angle() + PI / 2.0
+		fire_input = offset.length() < fire_range
+		return
 	var desired: float = offset.angle() + PI / 2.0
 	var difference := wrapf(desired - rotation, -PI, PI)
 	turn_input = clampf(difference * 2.0, -1.0, 1.0)
@@ -161,6 +199,12 @@ func _ai(_delta: float) -> void:
 
 
 func _draw() -> void:
+	for at in game.visible_positions(global_position):
+		draw_set_transform(to_local(at))
+		_draw_ship()
+
+
+func _draw_ship() -> void:
 	var color := Color("62e7e2") if player else Color("ff735c")
 	if stealth_on:
 		color.a = 0.45

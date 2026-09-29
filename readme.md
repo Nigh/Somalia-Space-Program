@@ -2,9 +2,17 @@
 
 ## 可玩战斗 MVP
 
-Godot 4.7.1 工程位于 `godot/`。运行：`godot --path godot`。无界面机制自检：`godot --headless --path godot --script res://check.gd`。
+Godot 4.7.2 工程位于 `godot/`。首次打开先运行 `godot --headless --path godot --editor --import`。运行：`godot --path godot`。无界面机制自检：`godot --headless --path godot --script res://check.gd`。
 
-主菜单包含一段海盗遭遇任务和六个独立测试场景。`W/S` 推进/刹车，`A/D` 转向，鼠标瞄准/开火，`1–6` 选择武器，`Q` 护盾，`F` 隐身，`E` EMP，`R` HACK，`Tab` 切换 HACK 目标模块，`Shift` 短距跃迁，`Space` 撤离跃迁，`O/P/I` 切换光学/雷达/红外，`Esc` 返回菜单。测试场景右侧面板可以重置状态和切换目标条件。
+主菜单包含一段海盗遭遇任务和七个独立测试场景。`W/S` 推进/刹车，`A/D` 转向，鼠标瞄准/左键开火，`1–6` 选择武器，`Q` 护盾，`F` 隐身，`E` EMP，`R` HACK，`Tab` 切换 HACK 目标模块，`Shift` 短距跃迁，`Space` 撤离跃迁，`O/P/I` 切换光学/雷达/红外，`Esc` 返回菜单。`F1` 展开/收起测试面板，可重置状态和切换目标条件。
+
+滚轮缩放；`V` 切换跟随/自由视角。自由视角下按住右键或中键拖动，也可点击或拖动右下角小地图跳转视角；此时仍可左键远程瞄准开火。跟随视角缩放范围为 45%–160%，自由视角为 8%–160%。小地图显示自机、探测到的敌人、鱼雷和当前视野；屏幕外的火控锁定目标显示方位箭头与距自机的距离。
+
+BULLET 发射间隔为 0.06 秒；CANNON 间隔为 0.96 秒、弹速为 2,040 米/秒，使用粗线段弹体，并产生短促震屏和后坐力。PULSE 每次扣费发射五发，间隔 0.065 秒，每发重新读取瞄准方向，可扫射；松开鼠标仍完成这一轮，切换武器或 EMP 会中断。按住左键时 BEAM 连续发射，伤害、能耗与热量按物理帧时间结算。
+
+TORPEDO 有效瞄准距离为 350–12,000 米，准心红色叉号表示距离不合法，不耗能也不进入冷却。近距离警戒圈只在准心进入 350 米范围时显示。鱼雷先沿舰体朝向冷发射弹出，0.35 秒后转向瞄准点、点火加速；加速期间有尾焰和烟雾，到达巡航速度后停止产生烟雾，在命中或飞完设定距离时爆炸。`Torpedo Sniping` 关卡默认开启自由视角和远程雷达：从 3,000 米防御圈外用鱼雷摧毁分别装备 BULLET、PULSE、MISSILE 的三座炮台，靠近会受到猛烈火力攻击。
+
+左上角船体、电力、当前武器热量使用细分格条及数值显示；右侧一排六个武器图标支持点击选择，也可用 `1–6` 快捷键，当前武器高亮。
 
 Web 包：`mkdir -p build/web` 后运行 `godot --headless --path godot --export-release Web ../build/web/index.html`。用 `python3 -m http.server 8765 --directory build/web` 在本地启动，再访问 `http://localhost:8765/`。目标为桌面 Chrome/Firefox；需由 HTTP 服务器提供文件，不能直接打开 `index.html`。`build/` 不纳入版本控制。
 

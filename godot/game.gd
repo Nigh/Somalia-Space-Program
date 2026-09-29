@@ -1,12 +1,18 @@
 extends Node2D
 
 const ARENA := Vector2(1500.0, 1050.0)
-const STAGES := ["Mission", "Power & Heat", "Sensors & Stealth", "Weapons", "Guidance & EMP", "HACK", "Warp Arena"]
+const STAGES := ["Mission", "Power & Heat", "Sensors & Stealth", "Weapons", "Guidance & EMP", "HACK", "Warp Arena", "Torpedo Sniping"]
+const TORPEDO_MIN_RANGE := 350.0
+const TORPEDO_MAX_RANGE := 12000.0
+const FOLLOW_MIN_ZOOM := 0.45
+const FREE_MIN_ZOOM := 0.08
+const MAX_ZOOM := 1.6
 const WEAPONS := {
-	"bullet": {"cost": 1.0, "heat": 3.0, "delay": 0.12, "damage": 5.0, "speed": 1000.0},
-	"cannon": {"cost": 5.0, "heat": 15.0, "delay": 0.32, "damage": 18.0, "speed": 680.0},
+	"bullet": {"cost": 1.0, "heat": 3.0, "delay": 0.06, "damage": 5.0, "speed": 1000.0},
+	"cannon": {"cost": 5.0, "heat": 15.0, "delay": 0.96, "damage": 18.0, "speed": 2040.0},
 	"pulse": {"cost": 8.0, "heat": 22.0, "delay": 0.4, "damage": 14.0, "speed": 850.0},
-	"beam": {"cost": 2.4, "heat": 5.0, "delay": 0.08, "damage": 3.2, "speed": 0.0},
+	# Continuous beam values are per second; physics ticks integrate them with delta.
+	"beam": {"cost": 30.0, "heat": 62.5, "delay": 0.0, "damage": 40.0, "speed": 0.0},
 	"missile": {"cost": 16.0, "heat": 26.0, "delay": 1.6, "damage": 36.0, "speed": 220.0},
 	"torpedo": {"cost": 22.0, "heat": 34.0, "delay": 2.8, "damage": 70.0, "speed": 100.0},
 }
@@ -20,11 +26,15 @@ var state := "menu"
 var wrap_enabled := false
 var extraction := Vector2(0, -780)
 var camera: Camera2D
+var shake_time := 0.0
+var free_camera := false
+var camera_dragging := false
+var map_dragging := false
+var tactical_overlay: Control
+var view_button: Button
 var menu: Control
 var hud: Control
 var test_panel: Control
-var status_label: Label
-var info_label: Label
 var message_label: Label
 var instructions: Label
 var message_time := 0.0
@@ -68,9 +78,13 @@ func start_stage(selected: String) -> void:
 	wrap_enabled = selected == "Warp Arena"
 	menu.visible = false
 	hud.visible = true
-	test_panel.visible = selected != "Mission"
+	test_panel.visible = false
 	player = _spawn_ship(Vector2(0, 250), true)
 	player.rotation = 0.0
+	free_camera = false
+	camera_dragging = false
+	camera.zoom = Vector2.ONE * 0.85
+	camera.position = player.position
 	match selected:
 		"Mission":
 			var first := _spawn_ship(Vector2(-260, -350))
@@ -115,7 +129,22 @@ func start_stage(selected: String) -> void:
 			generator.hp = 250.0
 			generator.energy = 100.0
 			_spawn_ship(Vector2(380, -280))
-			set_message("Space wraps at the border. Destroy the generator to escape by jump.")
+			set_message("The warp field folds space. Destroy the generator to escape by jump.")
+		"Torpedo Sniping":
+			player.weapon = "torpedo"
+			player.radar_radius = 10000.0
+			for index in 3:
+				var at: Vector2 = [Vector2(-1400, -5000), Vector2(0, -5600), Vector2(1500, -4900)][index]
+				var target := _spawn_ship(at)
+				target.sentry = true
+				target.weapon = ["bullet", "pulse", "missile"][index]
+				target.fire_range = 3000.0
+				target.radar_radius = 3000.0
+				target.damage_multiplier = 12.0
+			set_free_camera(true)
+			camera.zoom = Vector2.ONE * 0.08
+			camera.position = Vector2(0, -3000)
+			set_message("TORPEDO SNIPING: destroy 3 batteries. Stay outside their 3,000m defense zones.", 12.0)
 	_update_visibility()
 	queue_redraw()
 
@@ -143,35 +172,41 @@ func _clear_world() -> void:
 	ships.clear()
 	projectiles.clear()
 	effects.clear()
+	shake_time = 0.0
+	camera.offset = Vector2.ZERO
 	player = null
 	generator = null
 	wrap_enabled = false
+	free_camera = false
+	camera_dragging = false
+	map_dragging = false
 
 
-func _physics_process(delta: float) -> void:
+func _physics_process(_delta: float) -> void:
 	if state != "playing" or not is_instance_valid(player):
 		return
 	player.thrust_input = 1.0 if Input.is_key_pressed(KEY_W) else 0.0
 	player.turn_input = float(Input.is_key_pressed(KEY_D)) - float(Input.is_key_pressed(KEY_A))
 	player.brake_input = Input.is_key_pressed(KEY_S)
-	player.fire_input = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and get_viewport().gui_get_hovered_control() == null
-	for ship in ships:
-		if is_instance_valid(ship):
-			wrap_entity(ship)
+	player.fire_input = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and not camera_dragging and not map_dragging \
+		and get_viewport().gui_get_hovered_control() == null
 	for i in range(ships.size() - 1, -1, -1):
 		if not is_instance_valid(ships[i]) or ships[i].hp <= 0.0:
 			ships.remove_at(i)
 	for i in range(projectiles.size() - 1, -1, -1):
 		if not is_instance_valid(projectiles[i]) or projectiles[i].is_queued_for_deletion():
 			projectiles.remove_at(i)
+		elif not is_instance_valid(projectiles[i].owner_ship):
+			projectiles[i].queue_free()
+			projectiles.remove_at(i)
 	# ponytail: pair scan is enough for the small test arenas; use spatial queries if projectile counts grow.
 	for i in projectiles.size():
 		var a := projectiles[i]
-		if not is_instance_valid(a) or a.kind != "missile" and a.kind != "torpedo":
+		if not is_instance_valid(a) or a.is_queued_for_deletion() or a.kind != "missile" and a.kind != "torpedo":
 			continue
 		for j in projectiles.size():
 			var b := projectiles[j]
-			if i == j or not is_instance_valid(b) or b.owner_ship.player == a.owner_ship.player:
+			if i == j or not is_instance_valid(b) or b.is_queued_for_deletion() or b.owner_ship.player == a.owner_ship.player:
 				continue
 			if (b.kind == "bullet" or b.kind == "cannon") and offset_to(a.global_position, b.global_position).length() < 16.0:
 				flash(a.global_position, Color("ffba71"), 35.0)
@@ -185,10 +220,13 @@ func _physics_process(delta: float) -> void:
 
 
 func _process(delta: float) -> void:
+	shake_time = maxf(0.0, shake_time - delta)
+	camera.offset = Vector2(sin(shake_time * 110.0), cos(shake_time * 83.0)) * 9.0 * (shake_time / 0.22) / camera.zoom
 	if state != "playing":
 		return
 	if is_instance_valid(player):
-		camera.global_position = camera.global_position.lerp(player.global_position, minf(1.0, delta * 5.0))
+		if not free_camera:
+			camera.global_position = camera.global_position.lerp(player.global_position, minf(1.0, delta * 5.0))
 		_update_hud()
 	message_time = maxf(0.0, message_time - delta)
 	if message_time <= 0.0:
@@ -202,6 +240,14 @@ func _process(delta: float) -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and not event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		map_dragging = false
+	if event is InputEventMouseButton and not event.pressed and event.button_index in [MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT]:
+		camera_dragging = false
+	if event is InputEventMouseMotion and camera_dragging and free_camera:
+		camera.position -= event.relative / camera.zoom
+		get_viewport().set_input_as_handled()
+		return
 	if not event is InputEventKey or not event.pressed or event.echo:
 		return
 	if event.keycode == KEY_ESCAPE:
@@ -233,30 +279,100 @@ func _input(event: InputEvent) -> void:
 		test_target_index = (test_target_index + 1) % test_modules.size()
 	elif event.keycode == KEY_BACKSPACE and stage != "Mission":
 		start_stage(stage)
+	elif event.keycode == KEY_V:
+		set_free_camera(not free_camera)
+	elif event.keycode == KEY_F1:
+		test_panel.visible = not test_panel.visible
 
 
-func fire_weapon(ship: CombatShip) -> void:
+func _unhandled_input(event: InputEvent) -> void:
+	if state != "playing" or not event is InputEventMouseButton or not event.pressed:
+		return
+	if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+		zoom_view(1.15)
+	elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+		zoom_view(1.0 / 1.15)
+	elif free_camera and event.button_index in [MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT]:
+		camera_dragging = true
+	else:
+		return
+	get_viewport().set_input_as_handled()
+
+
+func set_free_camera(enabled: bool) -> void:
+	free_camera = enabled
+	camera_dragging = false
+	map_dragging = false
+	camera.zoom = Vector2.ONE * clampf(camera.zoom.x, FREE_MIN_ZOOM if enabled else FOLLOW_MIN_ZOOM, MAX_ZOOM)
+	if not enabled and is_instance_valid(player):
+		camera.position = player.position
+	camera.force_update_scroll()
+
+
+func zoom_view(factor: float) -> void:
+	var anchor := get_global_mouse_position()
+	camera.zoom = Vector2.ONE * clampf(camera.zoom.x * factor, FREE_MIN_ZOOM if free_camera else FOLLOW_MIN_ZOOM, MAX_ZOOM)
+	camera.force_update_scroll()
+	if free_camera:
+		camera.position += anchor - get_global_mouse_position()
+		camera.force_update_scroll()
+
+
+func weapon_aim(ship: CombatShip) -> Vector2:
+	if ship.player:
+		return get_global_mouse_position()
+	if is_instance_valid(ship.ai_target):
+		return ship.global_position + offset_to(ship.global_position, ship.ai_target.global_position)
+	return ship.global_position + Vector2.UP.rotated(ship.rotation) * 760.0
+
+
+func torpedo_aim_valid(ship: CombatShip, at: Vector2) -> bool:
+	var distance := ship.global_position.distance_to(at)
+	return distance >= TORPEDO_MIN_RANGE and distance <= TORPEDO_MAX_RANGE
+
+
+func fire_weapon(ship: CombatShip, delta := 1.0 / 60.0, pulse_tick := false) -> void:
+	if state != "playing" or not is_instance_valid(ship) or ship.hp <= 0.0:
+		return
 	var name := ship.weapon
+	if pulse_tick and name != "pulse":
+		return
+	if not pulse_tick and ship.cooldowns.get(name, 0.0) > 0.0:
+		return
 	var data: Dictionary = WEAPONS[name]
+	var aim_point := weapon_aim(ship)
+	if name == "torpedo" and not torpedo_aim_valid(ship, aim_point):
+		return
 	var locked_target: CombatShip
 	if name == "missile":
-		locked_target = _nearest_target(ship, 1100.0, true)
+		locked_target = _nearest_target(ship, ship.radar_radius, true)
 		if not is_instance_valid(locked_target):
 			if ship.player:
 				set_message("MISSILE: no fire-control lock.")
 			return
-	if not ship.module_ready("weapons") or not ship.spend(name, data.cost, data.heat):
+	var rate := delta if name == "beam" else 1.0
+	if rate <= 0.0 or not ship.module_ready("weapons"):
+		return
+	if not pulse_tick and not ship.spend(name, data.cost * rate, data.heat * rate):
 		return
 	var direction := Vector2.UP.rotated(ship.rotation)
-	if ship.player:
-		var aim := get_global_mouse_position() - ship.global_position
+	if ship.player or ship.sentry:
+		var aim := aim_point - ship.global_position
 		if aim.length() > 0.0:
 			direction = aim.normalized()
-	ship.cooldowns[name] = data.delay
+	if not pulse_tick:
+		ship.cooldowns[name] = data.delay
+		if name == "pulse":
+			ship.pulse_remaining = 4
+			ship.pulse_timer = ship.PULSE_INTERVAL
+	if name == "cannon" and ship.player:
+		ship.apply_central_impulse(-direction * ship.mass * 70.0)
+		shake_time = 0.22
+		flash(ship.global_position + direction * 30.0, Color("ffcf91"), 45.0)
 	play_sound("shot")
 	if name == "beam":
 		var start := ship.global_position + direction * 28.0
-		var distance := 760.0
+		var distance := ship.beam_range
 		var hit_ship: CombatShip
 		var hit_projectile: CombatProjectile
 		for target in ships:
@@ -269,7 +385,7 @@ func fire_weapon(ship: CombatShip) -> void:
 				hit_ship = target
 				hit_projectile = null
 		for shot in projectiles:
-			if not is_instance_valid(shot) or not is_instance_valid(shot.owner_ship) or shot.owner_ship.player == ship.player \
+			if not is_instance_valid(shot) or shot.is_queued_for_deletion() or not is_instance_valid(shot.owner_ship) or shot.owner_ship.player == ship.player \
 				or shot.kind != "missile" and shot.kind != "torpedo":
 				continue
 			var relative := offset_to(start, shot.global_position)
@@ -279,26 +395,36 @@ func fire_weapon(ship: CombatShip) -> void:
 				hit_projectile = shot
 				hit_ship = null
 		if is_instance_valid(hit_ship):
-			hit_ship.take_damage(data.damage * (0.65 if not ship.player else 1.0), "energy")
+			hit_ship.take_damage(data.damage * delta * ship.damage_multiplier * (0.65 if not ship.player else 1.0), "energy")
 		elif is_instance_valid(hit_projectile):
 			flash(hit_projectile.global_position, Color("8ee7ff"), 30.0)
 			hit_projectile.queue_free()
-		effects.append({"from": start, "to": start + direction * distance, "time": 0.1, "beam": true})
+		ship.beam_active = true
+		ship.beam_direction = direction
+		ship.beam_length = distance
 		return
 	var projectile := CombatProjectile.new()
 	projectile.game = self
 	projectile.owner_ship = ship
 	projectile.kind = name
-	projectile.damage = data.damage * (0.65 if not ship.player else 1.0)
+	projectile.damage = data.damage * ship.damage_multiplier * (0.65 if not ship.player else 1.0)
 	projectile.position = ship.global_position + direction * 29.0
 	projectile.velocity = direction * data.speed + ship.linear_velocity * 0.5
-	projectile.lifetime = 4.5 if name == "missile" else 5.0 if name == "torpedo" else 2.0
-	projectile.aim_point = get_global_mouse_position() if ship.player else ship.ai_target.global_position
+	projectile.lifetime = 4.5 if name == "missile" else 30.0 if name == "torpedo" else 2.0
+	if name == "cannon":
+		projectile.lifetime /= 3.0
+	if ship.sentry:
+		projectile.lifetime = ship.fire_range / (310.0 if name == "missile" else data.speed) + 1.0
+	projectile.aim_point = aim_point
 	if name == "missile":
 		projectile.target = locked_target
 		projectile.aim_point = projectile.target.global_position
 	elif name == "torpedo":
-		projectile.fuse = maxf(1.2, projectile.global_position.distance_to(projectile.aim_point) / 330.0)
+		var launch_direction := Vector2.UP.rotated(ship.rotation)
+		projectile.position = ship.global_position + launch_direction * 29.0
+		projectile.velocity = launch_direction * 160.0 + ship.linear_velocity
+		projectile.rotation = launch_direction.angle() + PI / 2.0
+		projectile.remaining_distance = projectile.position.distance_to(aim_point)
 	add_child(projectile)
 	projectiles.append(projectile)
 
@@ -342,11 +468,22 @@ func offset_to(from: Vector2, to: Vector2) -> Vector2:
 
 
 func wrap_entity(entity: Node2D) -> void:
-	if not wrap_enabled:
+	if not wrap_enabled or not is_instance_valid(player) or entity == player:
 		return
-	var at := entity.global_position
-	entity.global_position = Vector2(wrapf(at.x + ARENA.x, 0.0, ARENA.x * 2.0) - ARENA.x,
-		wrapf(at.y + ARENA.y, 0.0, ARENA.y * 2.0) - ARENA.y)
+	entity.global_position = player.global_position + offset_to(player.global_position, entity.global_position)
+
+
+func visible_positions(at: Vector2, margin := 40.0) -> Array[Vector2]:
+	if not wrap_enabled:
+		return [at]
+	var half_view := get_viewport_rect().size / camera.zoom * 0.5 + Vector2.ONE * margin
+	var view := Rect2(camera.global_position - half_view, half_view * 2.0)
+	var period := ARENA * 2.0
+	var positions: Array[Vector2] = []
+	for x in range(int(ceil((view.position.x - at.x) / period.x)), int(floor((view.end.x - at.x) / period.x)) + 1):
+		for y in range(int(ceil((view.position.y - at.y) / period.y)), int(floor((view.end.y - at.y) / period.y)) + 1):
+			positions.append(at + Vector2(x, y) * period)
+	return positions
 
 
 func _update_visibility() -> void:
@@ -368,6 +505,8 @@ func _on_ship_destroyed(ship: CombatShip) -> void:
 		set_message("Warp generator down. Press SPACE to escape.")
 	elif stage == "Mission" and _enemies_left() == 0:
 		set_message("Raiders neutralized. Fly to the extraction marker.")
+	elif stage == "Torpedo Sniping" and _enemies_left() == 0:
+		_finish(true)
 
 
 func _enemies_left() -> int:
@@ -385,6 +524,7 @@ func _finish(won: bool) -> void:
 		if is_instance_valid(ship):
 			ship.freeze = true
 			ship.fire_input = false
+			ship.beam_active = false
 	for projectile in projectiles:
 		if is_instance_valid(projectile):
 			projectile.queue_free()
@@ -447,6 +587,9 @@ func _jump() -> void:
 	if stage == "Mission" and (_enemies_left() > 0 or player.global_position.distance_to(extraction) > 150.0):
 		set_message("Clear the raiders and reach the extraction marker first.")
 		return
+	if stage == "Torpedo Sniping" and _enemies_left() > 0:
+		set_message("Destroy all three batteries before jumping.")
+		return
 	_finish(true)
 
 
@@ -478,10 +621,13 @@ func _panel_style() -> StyleBoxFlat:
 func _add_button(parent: Node, title: String, action: Callable) -> void:
 	var button := Button.new()
 	button.text = title
-	button.custom_minimum_size = Vector2(0, 34)
+	button.custom_minimum_size = Vector2(0, 28)
 	button.focus_mode = Control.FOCUS_NONE
 	button.add_theme_color_override("font_color", Color("bce9ed"))
-	button.add_theme_stylebox_override("normal", _panel_style())
+	var style := _panel_style()
+	style.content_margin_top = 4
+	style.content_margin_bottom = 4
+	button.add_theme_stylebox_override("normal", style)
 	button.pressed.connect(action)
 	parent.add_child(button)
 
@@ -516,38 +662,38 @@ func _build_ui() -> void:
 	hud.set_anchors_preset(Control.PRESET_FULL_RECT)
 	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(hud)
-	var top := PanelContainer.new()
-	top.position = Vector2(16, 14)
-	top.custom_minimum_size = Vector2(610, 88)
-	top.add_theme_stylebox_override("panel", _panel_style())
-	hud.add_child(top)
-	var top_box := VBoxContainer.new()
-	top.add_child(top_box)
-	status_label = Label.new()
-	status_label.add_theme_font_size_override("font_size", 18)
-	status_label.add_theme_color_override("font_color", Color("8fe8e6"))
-	top_box.add_child(status_label)
-	info_label = Label.new()
-	info_label.add_theme_color_override("font_color", Color("c6d5dd"))
-	top_box.add_child(info_label)
+	view_button = Button.new()
+	view_button.position = Vector2(650, 14)
+	view_button.size = Vector2(340, 36)
+	view_button.focus_mode = Control.FOCUS_NONE
+	view_button.pressed.connect(func() -> void: set_free_camera(not free_camera))
+	hud.add_child(view_button)
+	var tests_button := Button.new()
+	tests_button.text = "Test controls [F1]"
+	tests_button.position = Vector2(1010, 14)
+	tests_button.size = Vector2(250, 36)
+	tests_button.focus_mode = Control.FOCUS_NONE
+	tests_button.pressed.connect(func() -> void: test_panel.visible = not test_panel.visible)
+	hud.add_child(tests_button)
 	var bottom := PanelContainer.new()
-	bottom.position = Vector2(16, 622)
-	bottom.custom_minimum_size = Vector2(945, 82)
+	bottom.position = Vector2(16, 630)
+	bottom.custom_minimum_size = Vector2(974, 74)
 	bottom.add_theme_stylebox_override("panel", _panel_style())
 	hud.add_child(bottom)
 	instructions = Label.new()
-	instructions.text = "W/S thrust/brake   A/D turn   MOUSE aim/fire   1–6 weapon   Q shield   F stealth\nE EMP   R HACK   TAB hack module   SHIFT blink   SPACE jump   O/P/I sensors   ESC menu"
+	instructions.text = "W/S thrust/brake   A/D turn   LMB fire   1–6 weapon   Q shield   F stealth   O/P/I sensors\nE EMP   R HACK   TAB module   SHIFT blink   SPACE jump   ESC menu\nV follow/free view   WHEEL zoom   RMB/MMB drag in free view   Click minimap to pan   F1 tests"
+	instructions.add_theme_font_size_override("font_size", 13)
 	instructions.add_theme_color_override("font_color", Color("a7bfca"))
 	bottom.add_child(instructions)
 	message_label = Label.new()
-	message_label.position = Vector2(215, 117)
+	message_label.position = Vector2(16, 598)
 	message_label.custom_minimum_size = Vector2(900, 50)
-	message_label.add_theme_font_size_override("font_size", 17)
+	message_label.add_theme_font_size_override("font_size", 15)
 	message_label.add_theme_color_override("font_color", Color("ffd58b"))
 	hud.add_child(message_label)
 
 	test_panel = PanelContainer.new()
-	test_panel.position = Vector2(1010, 15)
+	test_panel.position = Vector2(1010, 62)
 	test_panel.custom_minimum_size = Vector2(250, 0)
 	test_panel.add_theme_stylebox_override("panel", _panel_style())
 	root.add_child(test_panel)
@@ -571,6 +717,9 @@ func _build_ui() -> void:
 	_add_button(test_box, "Toggle wrap", func() -> void: wrap_enabled = not wrap_enabled)
 	_add_button(test_box, "Next HACK module", func() -> void:
 		test_target_index = (test_target_index + 1) % test_modules.size())
+	tactical_overlay = preload("res://tactical_overlay.gd").new()
+	tactical_overlay.game = self
+	hud.add_child(tactical_overlay)
 
 
 func _test_toggle_stealth() -> void:
@@ -605,66 +754,64 @@ func _test_target_emp() -> void:
 
 
 func _update_hud() -> void:
-	status_label.text = "HULL %03d   POWER %03d   WEAPON %s" % [maxi(0, int(player.hp)), int(player.energy), player.weapon.to_upper()]
-	var heat_value: float = player.heat.get(player.weapon, 0.0)
-	var condition := "OVERLOAD" if player.energy < 25.0 else "READY"
-	info_label.text = "%s  ·  HEAT %02d  ·  SHIELD %s  ·  STEALTH %s  ·  HACK %s" % [
-		condition, int(heat_value), "ON" if player.shield_on else "OFF",
-		"ON" if player.stealth_on else "OFF", test_modules[test_target_index].to_upper()]
-	if stage == "Mission" and _enemies_left() == 0:
-		info_label.text += "  ·  EXIT %dm" % int(player.global_position.distance_to(extraction))
+	view_button.text = "%s VIEW  ·  %d%%  [V]" % ["FREE" if free_camera else "FOLLOW", roundi(camera.zoom.x * 100.0)]
 
 
 func _draw() -> void:
 	var grid_color := Color("184452")
-	grid_color.a = 0.34
-	for x in range(-2500, 2501, 100):
-		draw_line(Vector2(x, -2200), Vector2(x, 2200), grid_color, 1.0)
-	for y in range(-2200, 2201, 100):
-		draw_line(Vector2(-2500, y), Vector2(2500, y), grid_color, 1.0)
+	var half_view := get_viewport_rect().size / camera.zoom * 0.5 + Vector2(100, 100)
+	var top_left := camera.global_position - half_view
+	var bottom_right := camera.global_position + half_view
+	# AA coverage and constant screen-space width prevent subpixel flicker.
+	for spacing in [100, 500]:
+		grid_color.a = 0.34 * smoothstep(8.0, 45.0, spacing * camera.zoom.x)
+		for x in range(int(floor(top_left.x / spacing)) * spacing, int(bottom_right.x) + spacing, spacing):
+			if spacing == 500 or posmod(x, 500) != 0:
+				draw_line(Vector2(x, top_left.y), Vector2(x, bottom_right.y), grid_color, 1.0 / camera.zoom.x, true)
+		for y in range(int(floor(top_left.y / spacing)) * spacing, int(bottom_right.y) + spacing, spacing):
+			if spacing == 500 or posmod(y, 500) != 0:
+				draw_line(Vector2(top_left.x, y), Vector2(bottom_right.x, y), grid_color, 1.0 / camera.zoom.x, true)
 	for i in 85:
 		var point := Vector2(sin(float(i) * 42.17) * 2100.0, cos(float(i) * 17.31) * 1800.0)
-		draw_circle(point, 1.2, Color("496675"))
+		for at in visible_positions(point):
+			draw_circle(at, 1.2, Color("496675"))
 	for i in 18:
 		var center := Vector2(sin(float(i + 2) * 13.7) * 1700.0, cos(float(i + 4) * 7.3) * 1150.0)
 		var radius := 28.0 + float(i % 5) * 10.0
-		var points := PackedVector2Array()
-		for corner in 7:
-			var angle := TAU * float(corner) / 7.0
-			points.append(center + Vector2.from_angle(angle) * radius * (0.8 + 0.18 * sin(float(i + corner) * 3.1)))
-		draw_colored_polygon(points, Color("0b2029"))
-		points.append(points[0])
-		draw_polyline(points, Color("31515d"), 1.0)
+		for at in visible_positions(center, radius):
+			var points := PackedVector2Array()
+			for corner in 7:
+				var angle := TAU * float(corner) / 7.0
+				points.append(at + Vector2.from_angle(angle) * radius * (0.8 + 0.18 * sin(float(i + corner) * 3.1)))
+			draw_colored_polygon(points, Color("0b2029"))
+			points.append(points[0])
+			draw_polyline(points, Color("31515d"), 1.0)
 	if state != "playing" or not is_instance_valid(player):
 		return
-	if wrap_enabled:
-		draw_rect(Rect2(-ARENA, ARENA * 2.0), Color("4788a5"), false, 2.0)
 	if stage == "Mission" and _enemies_left() == 0:
 		draw_arc(extraction, 75.0, 0.0, TAU, 64, Color("71e8d9"), 3.0)
 		draw_line(extraction + Vector2(-15, 0), extraction + Vector2(15, 0), Color("71e8d9"), 2.0)
 	if player.has_radar and player.module_ready("radar"):
 		draw_arc(player.global_position, player.radar_radius, 0.0, TAU, 96, Color("225969"), 1.0)
-		for ship in ships:
-			if is_instance_valid(ship) and ship != player and can_fire_control(player, ship):
-				draw_rect(Rect2(ship.global_position - Vector2(16, 16), Vector2(32, 32)), Color("ff6673"), false, 1.5)
 	if player.has_ir and player.module_ready("ir"):
 		for ship in ships:
 			if is_instance_valid(ship) and ship != player and ship.is_hot() \
 				and offset_to(player.global_position, ship.global_position).length() < player.ir_radius:
-				draw_arc(ship.global_position, 25.0, 0.0, TAU, 24, Color("ffae69"), 2.0)
-	var cursor := get_global_mouse_position()
-	draw_arc(cursor, 12.0, 0.0, TAU, 28, Color("92e5e5"), 1.5)
-	draw_line(cursor + Vector2(-18, 0), cursor + Vector2(-8, 0), Color("92e5e5"), 1.5)
-	draw_line(cursor + Vector2(8, 0), cursor + Vector2(18, 0), Color("92e5e5"), 1.5)
+				for at in visible_positions(ship.global_position):
+					draw_arc(at, 25.0, 0.0, TAU, 24, Color("ffae69"), 2.0)
+	for ship in ships:
+		if not is_instance_valid(ship) or not ship.beam_active:
+			continue
+		var start := ship.global_position + ship.beam_direction * 28.0
+		var length := ship.beam_direction * ship.beam_length
+		for at in visible_positions(start, length.length()):
+			draw_line(at, at + length, Color("3899bb88"), 7.0 / camera.zoom.x, true)
+			draw_line(at, at + length, Color("b5f2ff"), 2.0 / camera.zoom.x, true)
 	for effect in effects:
-		if effect.has("beam"):
-			if wrap_enabled:
-				for dx in [-1, 0, 1]:
-					for dy in [-1, 0, 1]:
-						var shift := Vector2(dx * ARENA.x * 2.0, dy * ARENA.y * 2.0)
-						draw_line(effect.from + shift, effect.to + shift, Color("98e8ff", effect.time * 10.0), 3.0)
-			else:
-				draw_line(effect.from, effect.to, Color("98e8ff", effect.time * 10.0), 3.0)
-		else:
-			draw_arc(effect.at, effect.radius * (1.0 - effect.time / 0.32), 0.0, TAU, 48,
-				Color(effect.color, effect.time / 0.32), 2.0)
+		if effect.has("smoke"):
+			for at in visible_positions(effect.at):
+				draw_circle(at, 4.0 + (0.9 - effect.time) * 18.0, Color(0.55, 0.62, 0.68, effect.time * 0.35))
+			continue
+		for at in visible_positions(effect.at, effect.radius):
+			draw_arc(at, effect.radius * (1.0 - effect.time / 0.32), 0.0, TAU, 48,
+				Color(effect.color, effect.time / 0.32), 2.0, true)
