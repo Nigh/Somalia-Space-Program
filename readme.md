@@ -1,5 +1,15 @@
 # Somalia Space Program
 
+## 可玩战斗 MVP
+
+Godot 4.7.1 工程位于 `godot/`。运行：`godot --path godot`。无界面机制自检：`godot --headless --path godot --script res://check.gd`。
+
+主菜单包含一段海盗遭遇任务和六个独立测试场景。`W/S` 推进/刹车，`A/D` 转向，鼠标瞄准/开火，`1–6` 选择武器，`Q` 护盾，`F` 隐身，`E` EMP，`R` HACK，`Tab` 切换 HACK 目标模块，`Shift` 短距跃迁，`Space` 撤离跃迁，`O/P/I` 切换光学/雷达/红外，`Esc` 返回菜单。测试场景右侧面板可以重置状态和切换目标条件。
+
+Web 包：`mkdir -p build/web` 后运行 `godot --headless --path godot --export-release Web ../build/web/index.html`。用 `python3 -m http.server 8765 --directory build/web` 在本地启动，再访问 `http://localhost:8765/`。目标为桌面 Chrome/Firefox；需由 HTTP 服务器提供文件，不能直接打开 `index.html`。`build/` 不纳入版本控制。
+
+当前版本覆盖战斗机制的代表性实现；采矿、交易、星门经济和完整装配系统仍以本企划正文为设计资料。
+
 # 目录
 
 [TOC]
@@ -443,7 +453,6 @@ HACK到武器系统后，可直接关闭武器系统。
 
 - 交易界面操作
 - 飞船配置界面操作
-
 
 
 
