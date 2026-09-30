@@ -17,10 +17,14 @@ func run_checks() -> void:
 		assert(game.ships.size() >= 2, "%s did not spawn a target" % stage)
 		for i in 4:
 			await physics_frame
-	game.start_stage("Sensors & Stealth")
+	assert(await run_stealth_mission_checks(game), "stealth mission checks failed")
+	game.start_stage("Weapons")
 	await process_frame
 	var hot: CombatShip = game.ships[1]
 	var cold: CombatShip = game.ships[2]
+	hot.stealth_on = true
+	hot.thrust_input = 1.0
+	cold.stealth_on = true
 	assert(not game.can_fire_control(game.player, hot), "stealth must break radar lock")
 	assert(game.can_detect(game.player, hot), "IR must reveal a hot stealth target")
 	assert(not game.can_detect(game.player, cold), "cold stealth target must be hidden")
@@ -122,6 +126,10 @@ func run_checks() -> void:
 		enemy.take_damage(500.0, "kinetic")
 	game.player.global_position = game.extraction
 	game._jump()
+	assert(game.state == "playing" and game.player.jump_charging, "jump must start charging instead of finishing immediately")
+	game.advance_jump(4.9)
+	assert(game.state == "playing", "jump must wait for the full five seconds")
+	game.advance_jump(0.1)
 	assert(game.state == "won", "mission must finish at extraction after combat")
 	game.start_stage("Warp Arena")
 	await process_frame
@@ -164,8 +172,10 @@ func run_checks() -> void:
 	await process_frame
 	game.player.emp_timer = 0.0
 	game._jump()
+	game.advance_jump(5.0)
 	assert(game.state == "won", "destroying generator must allow escape")
 	assert(await run_tactical_checks(game), "tactical checks failed")
+	assert(run_jump_input_checks(game), "jump input checks failed")
 	print("Combat MVP checks passed")
 	for audio in game.sound_players.values():
 		audio.stop()
@@ -174,6 +184,90 @@ func run_checks() -> void:
 	# Let the audio thread release its finished playbacks before quitting.
 	await create_timer(0.1).timeout
 	quit()
+
+
+func run_stealth_mission_checks(game: Node2D) -> bool:
+	game.start_stage("Sensors & Stealth")
+	assert(game.stealth_turrets.size() == 8 and is_instance_valid(game.command_ship), "stealth mission must start surrounded by linked turrets")
+	var command: CombatShip = game.command_ship
+	var turrets: Array[CombatShip] = game.stealth_turrets.duplicate()
+	command.take_damage(999.0, "blast")
+	turrets[0].take_damage(999.0, "blast")
+	assert(command.hp == 220.0 and turrets[0].hp == 120.0, "network shields must enforce mission order")
+	game._jump()
+	assert(not game.player.jump_charging, "jump must not bypass the stealth mission")
+	game.player.stealth_on = false
+	game._update_stealth_objective()
+	game.player.stealth_on = true
+	game.player.position = game.stealth_center + Vector2(0, -1400)
+	game._update_stealth_objective()
+	assert(game.stealth_phase == "escape", "recloaking after detection must not count as a silent exit")
+	game.player.position = game.stealth_center
+	game.player.stealth_on = true
+	game.player.linear_velocity = Vector2(0, -400)
+	game._update_stealth_objective()
+	# Run the real rigid-body coast through a gap with active turret AI.
+	for tick in 330:
+		await physics_frame
+		if game.stealth_phase == "command":
+			break
+	assert(game.stealth_phase == "command" and game.player.hp == 120.0, "cold stealth coasting must escape the ring without damage")
+	assert(game.projectiles.is_empty(), "turrets must not fire at an undetected stealth ship")
+	command.take_damage(999.0, "blast")
+	assert(game.stealth_phase == "cleanup" and game.state == "playing", "command destruction must start cleanup rather than complete the mission")
+	for turret in turrets:
+		assert(turret.network_offline and not turret.network_shielded, "command loss must disable every turret and remove its shield")
+		turret.fire_input = true
+		turret._physics_process(100.0)
+		assert(not turret.module_ready("weapons"), "turret shutdown must be permanent")
+	assert(game.projectiles.is_empty(), "offline turrets must not fire")
+	for turret in turrets:
+		turret.take_damage(999.0, "blast")
+	assert(game.state == "won" and game.result_overlay.visible and not game.hud.visible, "clearing offline turrets must show the full-screen result")
+	game.start_stage("Weapons")
+	assert(not game.result_overlay.visible, "restarting must remove the result overlay")
+	return true
+
+
+func run_jump_input_checks(game: Node2D) -> bool:
+	game.start_stage("Weapons")
+	var events: Array[InputEvent] = []
+	for keycode in [KEY_W, KEY_Q, KEY_SPACE, KEY_V]:
+		var key := InputEventKey.new()
+		key.keycode = keycode
+		key.pressed = true
+		events.append(key)
+	for button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_WHEEL_UP]:
+		var button := InputEventMouseButton.new()
+		button.button_index = button_index
+		button.pressed = true
+		events.append(button)
+	var motion := InputEventMouseMotion.new()
+	motion.relative = Vector2(2, 0)
+	events.append(motion)
+	for event in events:
+		game._jump()
+		game.advance_jump(2.0)
+		game._input(event)
+		assert(not game.player.jump_charging and game.player.jump_charge == 0.0 and game.state == "playing", "any new operation must cancel and reset jump charge")
+	game._jump()
+	var release := InputEventKey.new()
+	release.keycode = KEY_SPACE
+	game._input(release)
+	assert(game.player.jump_charging, "releasing the initiating space key must allow charging")
+	game.player.thrust_input = 1.0
+	game.advance_jump(0.1)
+	assert(not game.player.jump_charging, "held thrust must cancel jump charge")
+	game.player.thrust_input = 0.0
+	game._jump()
+	game.player.emp_timer = 1.0
+	game.advance_jump(0.1)
+	assert(not game.player.jump_charging, "EMP must interrupt jump electronics")
+	game.player.emp_timer = 0.0
+	game._jump()
+	game.player.take_damage(1.0, "kinetic")
+	assert(not game.player.jump_charging, "impact must interrupt jump charge")
+	return true
 
 
 func run_tactical_checks(game: Node2D) -> bool:
@@ -228,13 +322,21 @@ func run_tactical_checks(game: Node2D) -> bool:
 	assert(torpedo.is_queued_for_deletion(), "torpedo must detonate on impact")
 	# Zoom limits, stationary free camera, map inverse mapping, and drag events.
 	game.start_stage("Torpedo Sniping")
-	assert(game.ships.size() == 4 and game.free_camera, "sniping range must spawn three batteries and free view")
+	assert(game.ships.size() == 4 and not game.free_camera, "sniping range must start in follow view")
+	assert(game.camera.position == game.player.position and is_equal_approx(game.camera.zoom.x, 0.85), "sniping view must start centered on the ship")
+	assert(game.player.torpedo_type == "heavy", "sniping range must equip heavy torpedoes")
+	game.set_free_camera(true)
+	var overlay: Control = game.tactical_overlay
+	var map_size: Vector2 = overlay.map_bounds().size
+	game.player.position = Vector2(30000, 30000)
+	assert(overlay.map_bounds().size == map_size, "tactical map scale must stay fixed")
+	assert(overlay.map_area().has_point(overlay.map_position(game.player.position)), "player must remain on the tactical map")
+	game.player.position = Vector2(0, 250)
 	game.zoom_view(0.001)
 	assert(is_equal_approx(game.camera.zoom.x, game.FREE_MIN_ZOOM), "free zoom limit")
 	var camera_before: Vector2 = game.camera.position
 	game._process(0.1)
 	assert(game.camera.position == camera_before, "free camera must not follow player")
-	var overlay: Control = game.tactical_overlay
 	var target: Vector2 = game.ships[1].position
 	assert(overlay.map_world(overlay.map_position(target)).distance_to(target) < 0.01, "minimap coordinates must round-trip")
 	var click := InputEventMouseButton.new()
@@ -282,6 +384,7 @@ func run_tactical_checks(game: Node2D) -> bool:
 	# Pan the free camera to aim at each battery without moving the ship.
 	# This also works with the headless display's fixed hardware cursor.
 	game.start_stage("Torpedo Sniping")
+	game.set_free_camera(true)
 	game.camera.force_update_scroll()
 	for enemy in game.ships.slice(1):
 		game.camera.position += enemy.position - game.weapon_aim(game.player)
@@ -330,10 +433,13 @@ func run_weapon_feedback_checks(game: Node2D) -> bool:
 	shooter.weapon = "pulse"
 	shooter.rotation = 0.0
 	game.fire_weapon(shooter)
+	assert(is_equal_approx(float(shooter.heat.pulse), game.WEAPONS.pulse.heat / 5.0), "pulse must add heat per shot")
+	assert(shooter.cooldowns.pulse > shooter.PULSE_INTERVAL * 4.0, "pulse must reload between bursts")
 	for index in 4:
 		shooter.rotation += 0.2
 		shooter._physics_process(shooter.PULSE_INTERVAL)
 	assert(game.projectiles.size() == 5 and shooter.pulse_remaining == 0, "pulse must complete exactly five shots after trigger release")
+	assert(is_equal_approx(float(shooter.heat.pulse), game.WEAPONS.pulse.heat - shooter.PULSE_INTERVAL * 4.0 * 18.0), "all five pulse shots must add heat")
 	for index in range(1, 5):
 		assert(game.projectiles[index].velocity.normalized().dot(game.projectiles[index - 1].velocity.normalized()) < 0.99, "burst must track changing aim")
 	shooter.cooldowns.clear()
@@ -351,12 +457,14 @@ func run_weapon_feedback_checks(game: Node2D) -> bool:
 	shooter = game.ships[1]
 	shooter.position = Vector2.ZERO
 	shooter.rotation = PI / 2.0
+	shooter.linear_velocity = Vector2.ZERO
 	shooter.weapon = "torpedo"
 	game.player.position = Vector2(0, -6000)
 	game.fire_weapon(shooter)
 	var torpedo: CombatProjectile = game.projectiles[0]
 	torpedo._physics_process(0.1)
-	assert(torpedo.velocity.x > 150.0 and absf(torpedo.velocity.y) < 0.1, "cold launch must follow the hull axis")
+	assert(absf(torpedo.velocity.x) > 150.0 and absf(torpedo.velocity.y) < 0.1, "cold launch must move across the target direction")
+	assert(absf(torpedo.rotation) < 0.1, "torpedo nose must face its target during ejection")
 	assert(not torpedo.motor_started and game.effects.is_empty(), "cold launch must have no exhaust")
 	for tick in 20:
 		torpedo._physics_process(1.0 / 60.0)
@@ -369,9 +477,79 @@ func run_weapon_feedback_checks(game: Node2D) -> bool:
 	for tick in 15:
 		torpedo._physics_process(1.0 / 60.0)
 	assert(game.effects.size() == smoke_count, "cruising torpedo must stop producing smoke")
+	shooter.cooldowns.clear()
+	game.player.position = Vector2(-6000, 0)
+	game.fire_weapon(shooter)
+	var side_torpedo: CombatProjectile = game.projectiles.back()
+	side_torpedo._physics_process(0.1)
+	assert(absf(side_torpedo.velocity.y) > 150.0 and absf(side_torpedo.velocity.x) < 0.1, "leftward aim must eject vertically")
+	assert(Vector2.UP.rotated(side_torpedo.rotation).dot((side_torpedo.aim_point - shooter.position).normalized()) > 0.99, "ejecting torpedo must face leftward aim")
+	game.start_stage("Guidance & EMP")
+	game.player.weapon = "missile"
+	game.fire_weapon(game.player)
+	var missile: CombatProjectile = game.projectiles[0]
+	missile.position = Vector2(10000, 10000)
+	missile.velocity = Vector2(310, 0)
+	missile.age = missile.lifetime
+	missile._physics_process(0.1)
+	assert(not missile.is_queued_for_deletion() and missile.velocity == Vector2(310, 0), "empty missile must coast without guidance")
+	missile._physics_process(missile.MISSILE_COAST_TIME + 0.1)
+	assert(not missile.is_queued_for_deletion() and missile.age > missile.lifetime + missile.MISSILE_COAST_TIME, "missile must fade after coasting")
+	missile._physics_process(missile.MISSILE_FADE_TIME)
+	assert(missile.is_queued_for_deletion(), "missile must expire after its fade")
 	var overlay: Control = game.tactical_overlay
 	assert(overlay.weapon_buttons.size() == 6, "weapon selector must contain six buttons")
 	overlay.weapon_buttons[2].pressed.emit()
 	overlay._process(0.0)
 	assert(game.player.weapon == "pulse" and overlay.weapon_buttons[2].button_pressed, "clicking a weapon icon must select and highlight it")
+	assert(run_torpedo_type_checks(game), "torpedo type checks failed")
+	return true
+
+
+func run_torpedo_type_checks(game: Node2D) -> bool:
+	game.start_stage("Weapons")
+	var shooter: CombatShip = game.ships[1]
+	shooter.ai_enabled = false
+	shooter.position = Vector2.ZERO
+	shooter.linear_velocity = Vector2.ZERO
+	shooter.weapon = "torpedo"
+	game.player.position = Vector2(0, -6000)
+	game.fire_weapon(shooter)
+	var rapid: CombatProjectile = game.projectiles.back()
+	assert(rapid.torpedo_type == "rapid" and shooter.cooldowns.torpedo < 2.8, "ordinary stages must use rapid torpedoes with a shorter reload")
+	shooter.torpedo_type = "heavy"
+	shooter.energy = 100.0
+	shooter.cooldowns.clear()
+	game.fire_weapon(shooter)
+	var heavy: CombatProjectile = game.projectiles.back()
+	heavy._physics_process(0.4)
+	assert(not heavy.motor_started and heavy.velocity.length() < rapid.velocity.length(), "heavy ejection must be slower with delayed ignition")
+	heavy._physics_process(0.35)
+	assert(heavy.motor_started and heavy.velocity.length() < 150.0, "heavy motor must accelerate slowly after ignition")
+	assert(heavy.damage >= rapid.damage * 7.0 and heavy.blast_radius >= rapid.blast_radius * 8.0, "heavy warhead must have much greater damage and radius")
+	game.player.position = Vector2(400, 0)
+	game.player.hp = 1000.0
+	rapid.position = Vector2.ZERO
+	rapid.explode()
+	assert(game.player.hp == 1000.0, "rapid blast must not hit outside its radius")
+	heavy.position = Vector2.ZERO
+	heavy.explode()
+	assert(game.player.hp < 800.0, "heavy blast must damage ships well beyond the rapid blast radius")
+	game.camera.position = Vector2.ZERO
+	game.shake_time = 0.0
+	game.torpedo_blast(Vector2.ZERO, heavy.blast_radius, true)
+	var close_strength: float = game.shake_strength
+	game.camera.position = Vector2(3000, 0)
+	game.shake_time = 0.0
+	game.torpedo_blast(Vector2.ZERO, heavy.blast_radius, true)
+	assert(game.shake_strength > 0.0 and game.shake_strength < close_strength, "blast shake must fall off with camera distance")
+	game.camera.position = Vector2(15000, 0)
+	game.shake_time = 0.0
+	game.torpedo_blast(Vector2.ZERO, heavy.blast_radius, true)
+	assert(is_zero_approx(game.shake_strength), "distant blast must not shake the camera")
+	game.state = "won"
+	game._process(0.5)
+	assert(not game.effects.is_empty() and game.effects.back().time < game.effects.back().duration, "final explosion must animate after mission completion")
+	game._process(3.0)
+	assert(game.effects.is_empty() and game.camera.offset == Vector2.ZERO, "blast effects and camera shake must settle")
 	return true

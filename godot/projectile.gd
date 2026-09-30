@@ -15,8 +15,13 @@ var alive := true
 var motor_started := false
 var accelerating := false
 var smoke_timer := 0.0
-const EJECT_TIME := 0.35
-const TORPEDO_SPEED := 1000.0
+var torpedo_type := "rapid"
+var eject_time := 0.35
+var cruise_speed := 1000.0
+var acceleration := 400.0
+var blast_radius := 100.0
+const MISSILE_COAST_TIME := 1.0
+const MISSILE_FADE_TIME := 0.5
 
 
 func _physics_process(delta: float) -> void:
@@ -30,26 +35,27 @@ func _physics_process(delta: float) -> void:
 		if owner_ship.emp_timer > 0.0:
 			queue_free()
 			return
-		if owner_ship.fire_control_spoof:
-			aim_point = owner_ship.global_position
-		elif is_instance_valid(target) and game.can_fire_control(owner_ship, target):
-			aim_point = target.global_position
-		var desired: Vector2 = (game.offset_to(global_position, aim_point)).normalized() * 310.0
-		velocity = velocity.lerp(desired, minf(1.0, delta * 2.0))
+		if age < lifetime:
+			if owner_ship.fire_control_spoof:
+				aim_point = owner_ship.global_position
+			elif is_instance_valid(target) and game.can_fire_control(owner_ship, target):
+				aim_point = target.global_position
+			var desired: Vector2 = (game.offset_to(global_position, aim_point)).normalized() * 310.0
+			velocity = velocity.lerp(desired, minf(1.0, delta * 2.0))
 	elif kind == "torpedo":
-		if age >= EJECT_TIME:
+		if age >= eject_time:
 			if not motor_started:
 				motor_started = true
-				velocity = (aim_point - global_position).normalized() * minf(velocity.length(), TORPEDO_SPEED)
+				velocity = (aim_point - global_position).normalized() * minf(velocity.length(), cruise_speed)
 				remaining_distance = global_position.distance_to(aim_point)
-			velocity = velocity.move_toward(velocity.normalized() * TORPEDO_SPEED, 400.0 * delta)
-			accelerating = velocity.length() < TORPEDO_SPEED - 0.1
+			velocity = velocity.move_toward(velocity.normalized() * cruise_speed, acceleration * delta)
+			accelerating = velocity.length() < cruise_speed - 0.1
 			if accelerating:
 				smoke_timer -= delta
 				if smoke_timer <= 0.0:
 					game.effects.append({"at": global_position - velocity.normalized() * 10.0, "time": 0.9, "smoke": true})
 					smoke_timer += 0.04
-	if age >= lifetime:
+	if age >= lifetime + (MISSILE_COAST_TIME + MISSILE_FADE_TIME if kind == "missile" else 0.0):
 		queue_free()
 		return
 	var from := global_position
@@ -83,7 +89,7 @@ func _physics_process(delta: float) -> void:
 			return
 	else:
 		game.wrap_entity(self)
-	if kind == "missile" or kind == "torpedo":
+	if kind == "missile" or kind == "torpedo" and motor_started:
 		rotation = velocity.angle() + PI / 2.0
 	queue_redraw()
 
@@ -98,15 +104,15 @@ func explode() -> void:
 	for ship in game.ships:
 		if is_instance_valid(ship) and ship.player != owner_ship.player:
 			var distance: float = game.offset_to(global_position, ship.global_position).length()
-			if distance < 100.0:
-				ship.take_damage(damage * (1.0 - distance / 140.0), "blast")
-	game.flash(global_position, Color("ffbf76"), 110.0)
+			if distance < blast_radius:
+				ship.take_damage(damage * (1.0 - distance / (blast_radius * 1.4)), "blast")
+	game.torpedo_blast(global_position, blast_radius, torpedo_type == "heavy")
 	queue_free()
 
 
 func _draw() -> void:
 	for at in game.visible_positions(global_position):
-		draw_set_transform(to_local(at))
+		draw_set_transform(to_local(at), 0.0, Vector2.ONE * (1.65 if kind == "torpedo" and torpedo_type == "heavy" else 1.0))
 		_draw_projectile()
 
 
@@ -116,6 +122,7 @@ func _draw_projectile() -> void:
 		color = Color("78e7ff")
 	elif kind == "missile":
 		color = Color("ff5b79")
+		color.a = clampf((lifetime + MISSILE_COAST_TIME + MISSILE_FADE_TIME - age) / MISSILE_FADE_TIME, 0.0, 1.0)
 	elif kind == "torpedo":
 		color = Color("ffc46b")
 	if kind == "missile" or kind == "torpedo":
@@ -123,8 +130,10 @@ func _draw_projectile() -> void:
 			var length := 32.0 if accelerating else 13.0
 			draw_colored_polygon(PackedVector2Array([Vector2(-4, 7), Vector2(0, length), Vector2(4, 7)]), Color("ff9d47"))
 			draw_line(Vector2(0, 7), Vector2(0, length * 0.7), Color("fff3c4"), 3.0, true)
+		elif kind == "missile" and age < lifetime:
+			draw_colored_polygon(PackedVector2Array([Vector2(-3, 7), Vector2(0, 18), Vector2(3, 7)]), Color("ff9d47"))
 		draw_colored_polygon(PackedVector2Array([Vector2(0, -10), Vector2(5, 7), Vector2(-5, 7)]), color)
-		draw_line(Vector2.ZERO, Vector2(0, 17), color.darkened(0.4), 2.0)
+		draw_line(Vector2.ZERO, Vector2(0, 17), Color(color.r * 0.6, color.g * 0.6, color.b * 0.6, color.a), 2.0)
 	elif kind == "pulse" or kind == "cannon":
 		var direction := velocity.normalized()
 		var length := 22.0 if kind == "cannon" else 12.0

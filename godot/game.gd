@@ -7,26 +7,42 @@ const TORPEDO_MAX_RANGE := 12000.0
 const FOLLOW_MIN_ZOOM := 0.45
 const FREE_MIN_ZOOM := 0.08
 const MAX_ZOOM := 1.6
+const JUMP_DURATION := 5.0
+const STEALTH_RING_RADIUS := 1000.0
+const STEALTH_EXIT_RADIUS := 1350.0
 const WEAPONS := {
 	"bullet": {"cost": 1.0, "heat": 3.0, "delay": 0.06, "damage": 5.0, "speed": 1000.0},
 	"cannon": {"cost": 5.0, "heat": 15.0, "delay": 0.96, "damage": 18.0, "speed": 2040.0},
-	"pulse": {"cost": 8.0, "heat": 22.0, "delay": 0.4, "damage": 14.0, "speed": 850.0},
+	"pulse": {"cost": 8.0, "heat": 22.0, "delay": 1.0, "damage": 14.0, "speed": 850.0},
 	# Continuous beam values are per second; physics ticks integrate them with delta.
 	"beam": {"cost": 30.0, "heat": 62.5, "delay": 0.0, "damage": 40.0, "speed": 0.0},
 	"missile": {"cost": 16.0, "heat": 26.0, "delay": 1.6, "damage": 36.0, "speed": 220.0},
-	"torpedo": {"cost": 22.0, "heat": 34.0, "delay": 2.8, "damage": 70.0, "speed": 100.0},
+	"torpedo": {"cost": 22.0, "heat": 34.0, "delay": 1.6, "damage": 70.0, "speed": 1000.0,
+		"eject_speed": 160.0, "eject_time": 0.35, "acceleration": 400.0, "blast_radius": 100.0},
 }
+const HEAVY_TORPEDO := {"cost": 35.0, "heat": 55.0, "delay": 3.8, "damage": 560.0, "speed": 1000.0,
+	"eject_speed": 65.0, "eject_time": 0.7, "acceleration": 150.0, "blast_radius": 800.0}
 
 var ships: Array[CombatShip] = []
 var projectiles: Array[CombatProjectile] = []
 var player: CombatShip
 var generator: CombatShip
+var command_ship: CombatShip
+var stealth_turrets: Array[CombatShip] = []
+var stealth_phase := "escape"
+var stealth_inside := true
+var stealth_detected := false
+var stealth_center := Vector2(0, 250)
 var stage := ""
 var state := "menu"
 var wrap_enabled := false
 var extraction := Vector2(0, -780)
 var camera: Camera2D
 var shake_time := 0.0
+var shake_strength := 0.0
+var shake_duration := 0.22
+var beam_mesh := ArrayMesh.new()
+var blast_texture := GradientTexture2D.new()
 var free_camera := false
 var camera_dragging := false
 var map_dragging := false
@@ -37,6 +53,11 @@ var hud: Control
 var test_panel: Control
 var message_label: Label
 var instructions: Label
+var objective_label: Label
+var result_overlay: Control
+var result_title: Label
+var result_hint: Label
+var result_tween: Tween
 var message_time := 0.0
 var effects: Array[Dictionary] = []
 var test_target_index := 0
@@ -46,6 +67,16 @@ var sound_gates: Dictionary = {}
 
 
 func _ready() -> void:
+	_build_beam_mesh()
+	var gradient := Gradient.new()
+	gradient.offsets = PackedFloat32Array([0.0, 0.25, 0.55, 0.8, 1.0])
+	gradient.colors = PackedColorArray([Color.WHITE, Color(1, 1, 1, 0.95), Color(1, 1, 1, 0.65), Color(1, 1, 1, 0.18), Color(1, 1, 1, 0)])
+	blast_texture.gradient = gradient
+	blast_texture.fill = GradientTexture2D.FILL_RADIAL
+	blast_texture.fill_from = Vector2(0.5, 0.5)
+	blast_texture.fill_to = Vector2(1.0, 0.5)
+	blast_texture.width = 256
+	blast_texture.height = 256
 	camera = Camera2D.new()
 	camera.zoom = Vector2(0.85, 0.85)
 	camera.enabled = true
@@ -97,18 +128,23 @@ func start_stage(selected: String) -> void:
 			_spawn_ship(Vector2(0, -420), false)
 			set_message("Hold fire, thrust and shield. Watch power and per-module heat.")
 		"Sensors & Stealth":
-			var hot := _spawn_ship(Vector2(-260, -260), false)
-			hot.ai_enabled = false
-			hot.stealth_on = true
-			hot.thrust_input = 1.0
-			var cold := _spawn_ship(Vector2(300, -300), false)
-			cold.ai_enabled = false
-			cold.stealth_on = true
-			cold.has_optical = false
-			cold.has_radar = false
-			cold.has_ir = false
-			cold.has_ir = false
-			set_message("Toggle optical, radar and IR. Stealth hides from optical/radar; heat reveals IR.")
+			player.stealth_on = true
+			player.radar_radius = 4500.0
+			for index in 8:
+				var turret := _spawn_ship(stealth_center + Vector2.from_angle(TAU * float(index) / 8.0 + PI / 8.0) * STEALTH_RING_RADIUS)
+				turret.sentry = true
+				turret.freeze = true
+				turret.network_shielded = true
+				turret.weapon = "pulse" if index % 2 == 0 else "bullet"
+				turret.fire_range = 1450.0
+				turret.ir_radius = 400.0
+				turret.damage_multiplier = 3.0
+				stealth_turrets.append(turret)
+			command_ship = _spawn_ship(Vector2(0, -3200))
+			command_ship.hp = 220.0
+			command_ship.weapon = "pulse"
+			command_ship.network_shielded = true
+			set_message("SILENT RUN: stealth is on. Accelerate, then coast cold through a gap. Destroy the command ship outside the ring.", 12.0)
 		"Weapons":
 			for x in [-340, 0, 340]:
 				var target := _spawn_ship(Vector2(x, -420), false)
@@ -132,6 +168,7 @@ func start_stage(selected: String) -> void:
 			set_message("The warp field folds space. Destroy the generator to escape by jump.")
 		"Torpedo Sniping":
 			player.weapon = "torpedo"
+			player.torpedo_type = "heavy"
 			player.radar_radius = 10000.0
 			for index in 3:
 				var at: Vector2 = [Vector2(-1400, -5000), Vector2(0, -5600), Vector2(1500, -4900)][index]
@@ -141,11 +178,9 @@ func start_stage(selected: String) -> void:
 				target.fire_range = 3000.0
 				target.radar_radius = 3000.0
 				target.damage_multiplier = 12.0
-			set_free_camera(true)
-			camera.zoom = Vector2.ONE * 0.08
-			camera.position = Vector2(0, -3000)
-			set_message("TORPEDO SNIPING: destroy 3 batteries. Stay outside their 3,000m defense zones.", 12.0)
+			set_message("HEAVY TORPEDO: press V for free view. Destroy 3 batteries outside their 3,000m defense zones.", 12.0)
 	_update_visibility()
+	_update_hud()
 	queue_redraw()
 
 
@@ -163,6 +198,14 @@ func _spawn_ship(at: Vector2, is_player := false) -> CombatShip:
 
 
 func _clear_world() -> void:
+	if is_instance_valid(result_tween):
+		result_tween.kill()
+	result_overlay.hide()
+	stealth_turrets.clear()
+	command_ship = null
+	stealth_phase = "escape"
+	stealth_inside = true
+	stealth_detected = false
 	for ship in ships:
 		if is_instance_valid(ship):
 			ship.queue_free()
@@ -173,6 +216,7 @@ func _clear_world() -> void:
 	projectiles.clear()
 	effects.clear()
 	shake_time = 0.0
+	shake_strength = 0.0
 	camera.offset = Vector2.ZERO
 	player = null
 	generator = null
@@ -182,7 +226,7 @@ func _clear_world() -> void:
 	map_dragging = false
 
 
-func _physics_process(_delta: float) -> void:
+func _physics_process(delta: float) -> void:
 	if state != "playing" or not is_instance_valid(player):
 		return
 	player.thrust_input = 1.0 if Input.is_key_pressed(KEY_W) else 0.0
@@ -190,6 +234,9 @@ func _physics_process(_delta: float) -> void:
 	player.brake_input = Input.is_key_pressed(KEY_S)
 	player.fire_input = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and not camera_dragging and not map_dragging \
 		and get_viewport().gui_get_hovered_control() == null
+	advance_jump(delta)
+	if state != "playing":
+		return
 	for i in range(ships.size() - 1, -1, -1):
 		if not is_instance_valid(ships[i]) or ships[i].hp <= 0.0:
 			ships.remove_at(i)
@@ -214,15 +261,22 @@ func _physics_process(_delta: float) -> void:
 				b.queue_free()
 				break
 	if stage == "Mission" and _enemies_left() == 0 and player.global_position.distance_to(extraction) < 150.0:
-		set_message("Extraction reached. Press SPACE to jump.")
+		if not player.jump_charging:
+			set_message("Extraction reached. Press SPACE to charge a 5s jump. Any input interrupts it.")
+	if stage == "Sensors & Stealth":
+		_update_stealth_objective()
 	_update_visibility()
 	queue_redraw()
 
 
 func _process(delta: float) -> void:
 	shake_time = maxf(0.0, shake_time - delta)
-	camera.offset = Vector2(sin(shake_time * 110.0), cos(shake_time * 83.0)) * 9.0 * (shake_time / 0.22) / camera.zoom
+	camera.offset = Vector2(sin(shake_time * 110.0), cos(shake_time * 83.0)) * shake_strength * (shake_time / shake_duration) / camera.zoom
+	for effect in effects:
+		effect.time -= delta
+	effects = effects.filter(func(effect: Dictionary) -> bool: return effect.time > 0.0)
 	if state != "playing":
+		queue_redraw()
 		return
 	if is_instance_valid(player):
 		if not free_camera:
@@ -231,15 +285,19 @@ func _process(delta: float) -> void:
 	message_time = maxf(0.0, message_time - delta)
 	if message_time <= 0.0:
 		message_label.text = ""
-	for effect in effects:
-		effect.time -= delta
-	effects = effects.filter(func(effect: Dictionary) -> bool: return effect.time > 0.0)
 	for name in sound_gates.keys():
 		sound_gates[name] = maxf(0.0, sound_gates[name] - delta)
 	queue_redraw()
 
 
 func _input(event: InputEvent) -> void:
+	if state == "playing" and is_instance_valid(player) and player.jump_charging:
+		if event is InputEventKey and event.pressed and not event.echo \
+			or event is InputEventMouseButton and event.pressed \
+			or event is InputEventMouseMotion and not event.relative.is_zero_approx():
+			cancel_jump("player input")
+			if event is InputEventKey and event.keycode == KEY_SPACE:
+				return
 	if event is InputEventMouseButton and not event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		map_dragging = false
 	if event is InputEventMouseButton and not event.pressed and event.button_index in [MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT]:
@@ -334,12 +392,16 @@ func torpedo_aim_valid(ship: CombatShip, at: Vector2) -> bool:
 func fire_weapon(ship: CombatShip, delta := 1.0 / 60.0, pulse_tick := false) -> void:
 	if state != "playing" or not is_instance_valid(ship) or ship.hp <= 0.0:
 		return
+	if ship.player and ship.jump_charging:
+		cancel_jump("weapon fire")
 	var name := ship.weapon
 	if pulse_tick and name != "pulse":
 		return
 	if not pulse_tick and ship.cooldowns.get(name, 0.0) > 0.0:
 		return
 	var data: Dictionary = WEAPONS[name]
+	if name == "torpedo" and ship.torpedo_type == "heavy":
+		data = HEAVY_TORPEDO
 	var aim_point := weapon_aim(ship)
 	if name == "torpedo" and not torpedo_aim_valid(ship, aim_point):
 		return
@@ -353,8 +415,12 @@ func fire_weapon(ship: CombatShip, delta := 1.0 / 60.0, pulse_tick := false) -> 
 	var rate := delta if name == "beam" else 1.0
 	if rate <= 0.0 or not ship.module_ready("weapons"):
 		return
-	if not pulse_tick and not ship.spend(name, data.cost * rate, data.heat * rate):
+	if not pulse_tick and not ship.spend(name, data.cost * rate, data.heat * rate / (5.0 if name == "pulse" else 1.0)):
 		return
+	if pulse_tick:
+		ship.heat[name] = ship.heat.get(name, 0.0) + data.heat / 5.0
+		if ship.heat[name] >= 100.0:
+			ship.overheated[name] = true
 	var direction := Vector2.UP.rotated(ship.rotation)
 	if ship.player or ship.sentry:
 		var aim := aim_point - ship.global_position
@@ -367,7 +433,7 @@ func fire_weapon(ship: CombatShip, delta := 1.0 / 60.0, pulse_tick := false) -> 
 			ship.pulse_timer = ship.PULSE_INTERVAL
 	if name == "cannon" and ship.player:
 		ship.apply_central_impulse(-direction * ship.mass * 70.0)
-		shake_time = 0.22
+		shake(9.0, 0.22)
 		flash(ship.global_position + direction * 30.0, Color("ffcf91"), 45.0)
 	play_sound("shot")
 	if name == "beam":
@@ -420,9 +486,15 @@ func fire_weapon(ship: CombatShip, delta := 1.0 / 60.0, pulse_tick := false) -> 
 		projectile.target = locked_target
 		projectile.aim_point = projectile.target.global_position
 	elif name == "torpedo":
-		var launch_direction := Vector2.UP.rotated(ship.rotation)
-		projectile.position = ship.global_position + launch_direction * 29.0
-		projectile.velocity = launch_direction * 160.0 + ship.linear_velocity
+		projectile.torpedo_type = ship.torpedo_type
+		projectile.eject_time = data.eject_time
+		projectile.cruise_speed = data.speed
+		projectile.acceleration = data.acceleration
+		projectile.blast_radius = data.blast_radius
+		var launch_direction := (aim_point - ship.global_position).normalized()
+		var eject_direction := launch_direction.orthogonal()
+		projectile.position = ship.global_position + eject_direction * 29.0
+		projectile.velocity = eject_direction * data.eject_speed + ship.linear_velocity
 		projectile.rotation = launch_direction.angle() + PI / 2.0
 		projectile.remaining_distance = projectile.position.distance_to(aim_point)
 	add_child(projectile)
@@ -500,13 +572,59 @@ func _on_ship_destroyed(ship: CombatShip) -> void:
 	play_sound("hit")
 	if ship == player:
 		_finish(false)
+	elif ship == command_ship:
+		command_ship = null
+		stealth_phase = "cleanup"
+		for turret in stealth_turrets:
+			if not is_instance_valid(turret) or turret.hp <= 0.0:
+				continue
+			turret.network_shielded = false
+			turret.network_offline = true
+			turret.ai_enabled = false
+			turret.fire_input = false
+			turret.thrust_input = 0.0
+			turret.turn_input = 0.0
+			turret.pulse_remaining = 0
+			turret.beam_active = false
+			flash(turret.global_position, Color("ac98e6"), 60.0)
+		for shot in projectiles:
+			if is_instance_valid(shot) and shot.owner_ship in stealth_turrets:
+				shot.queue_free()
+		set_message("COMMAND LINK LOST: all turrets permanently offline. Destroy the remaining platforms.", 10.0)
+		if _enemies_left() == 0:
+			_finish(true)
 	elif ship == generator:
 		generator = null
 		set_message("Warp generator down. Press SPACE to escape.")
 	elif stage == "Mission" and _enemies_left() == 0:
 		set_message("Raiders neutralized. Fly to the extraction marker.")
-	elif stage == "Torpedo Sniping" and _enemies_left() == 0:
+	elif stage in ["Torpedo Sniping", "Sensors & Stealth"] and _enemies_left() == 0:
 		_finish(true)
+
+
+func _update_stealth_objective() -> void:
+	if stealth_phase != "escape":
+		return
+	var distance := player.global_position.distance_to(stealth_center)
+	var inside := distance <= STEALTH_EXIT_RADIUS
+	var silent := player.stealth_on
+	for turret in stealth_turrets:
+		if is_instance_valid(turret) and can_detect(turret, player):
+			silent = false
+	if not silent:
+		if not stealth_detected:
+			set_message("DETECTED: retreat to the inner safe zone, restore stealth and cool down before retrying.", 10.0)
+		stealth_detected = true
+	elif distance < STEALTH_RING_RADIUS * 0.6:
+		stealth_detected = false
+	if not inside and stealth_inside:
+		if silent and not stealth_detected:
+			stealth_phase = "command"
+			command_ship.network_shielded = false
+			set_message("SILENT EXIT COMPLETE: command ship exposed. Destroy it to disable the turret network.", 10.0)
+		else:
+			set_message("EXIT DETECTED: return to the inner safe zone, then leave under stealth without detection.", 10.0)
+	stealth_inside = inside
 
 
 func _enemies_left() -> int:
@@ -518,13 +636,29 @@ func _enemies_left() -> int:
 
 
 func _finish(won: bool) -> void:
+	if state != "playing":
+		return
 	state = "won" if won else "lost"
-	set_message("MISSION COMPLETE — press ESC for menu." if won else "SHIP LOST — press ESC for menu.", 999.0)
+	hud.hide()
+	test_panel.hide()
+	result_overlay.show()
+	result_overlay.modulate.a = 0.0
+	result_title.text = "MISSION COMPLETE" if won else "SHIP LOST"
+	result_title.add_theme_color_override("font_color", Color("77e4e8") if won else Color("ff735c"))
+	result_title.scale = Vector2.ONE * 1.08
+	result_title.pivot_offset = result_title.size * 0.5
+	result_hint.text = "%s\n\nESC  /  RETURN TO MAIN MENU" % stage.to_upper()
+	result_tween = create_tween().set_parallel(true)
+	result_tween.tween_property(result_overlay, "modulate:a", 1.0, 0.6)
+	result_tween.tween_property(result_title, "scale", Vector2.ONE, 0.8).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	for ship in ships:
 		if is_instance_valid(ship):
 			ship.freeze = true
 			ship.fire_input = false
 			ship.beam_active = false
+			ship.pulse_remaining = 0
+			ship.jump_charging = false
+			ship.jump_charge = 0.0
 	for projectile in projectiles:
 		if is_instance_valid(projectile):
 			projectile.queue_free()
@@ -542,8 +676,8 @@ func _activate_emp() -> void:
 		if is_instance_valid(projectile) and offset_to(player.global_position, projectile.global_position).length() < 350.0:
 			if projectile.kind == "missile":
 				projectile.queue_free()
-			elif projectile.kind == "torpedo" and projectile.age < 0.7:
-				projectile.age = 0.7
+			elif projectile.kind == "torpedo" and projectile.age < projectile.eject_time:
+				projectile.age = projectile.eject_time
 	flash(player.global_position, Color("8fd8ff"), 350.0)
 	play_sound("emp")
 	set_message("EMP pulse: nearby electronics offline; your systems recover first.")
@@ -576,25 +710,103 @@ func _blink() -> void:
 		player.blink_cooldown = 5.0
 
 
-func _jump() -> void:
-	if player.emp_timer > 0.0:
+func _can_jump() -> bool:
+	if not player.module_ready("jump"):
 		set_message("JUMP OFFLINE: electronics recovering from EMP.")
-		return
+		return false
 	if stage == "Warp Arena" and is_instance_valid(generator):
 		player.emp_timer = 1.5
 		set_message("Generator field interrupts the jump and disables electronics.")
-		return
+		return false
 	if stage == "Mission" and (_enemies_left() > 0 or player.global_position.distance_to(extraction) > 150.0):
 		set_message("Clear the raiders and reach the extraction marker first.")
-		return
+		return false
 	if stage == "Torpedo Sniping" and _enemies_left() > 0:
 		set_message("Destroy all three batteries before jumping.")
+		return false
+	if stage == "Sensors & Stealth" and _enemies_left() > 0:
+		set_message("Complete the silent exit, destroy the command ship, then clear its turrets.")
+		return false
+	return true
+
+
+func _jump() -> void:
+	if state != "playing" or not is_instance_valid(player):
 		return
-	_finish(true)
+	if player.jump_charging:
+		cancel_jump("player input")
+		return
+	if not _can_jump():
+		return
+	player.jump_charging = true
+	player.jump_charge = 0.0
+	set_message("JUMP CHARGING: keep all controls idle for 5 seconds.")
+
+
+func cancel_jump(reason: String) -> void:
+	if not is_instance_valid(player) or not player.jump_charging:
+		return
+	player.jump_charging = false
+	player.jump_charge = 0.0
+	set_message("JUMP INTERRUPTED: %s." % reason)
+
+
+func advance_jump(delta: float) -> void:
+	if not player.jump_charging:
+		return
+	if player.thrust_input > 0.0 or not is_zero_approx(player.turn_input) or player.brake_input \
+		or player.fire_input or player.pulse_remaining > 0 or camera_dragging or map_dragging:
+		cancel_jump("controls must remain idle")
+		return
+	if not _can_jump():
+		cancel_jump("jump conditions changed")
+		return
+	player.jump_charge = minf(JUMP_DURATION, player.jump_charge + delta)
+	if player.jump_charge >= JUMP_DURATION:
+		flash(player.global_position, Color("78dfff"), 160.0)
+		_finish(true)
 
 
 func flash(at: Vector2, color: Color, radius: float) -> void:
 	effects.append({"at": at, "color": color, "radius": radius, "time": 0.32})
+
+
+func shake(strength: float, duration: float) -> void:
+	if strength < shake_strength * shake_time / shake_duration:
+		return
+	shake_strength = strength
+	shake_duration = duration
+	shake_time = duration
+
+
+func torpedo_blast(at: Vector2, radius: float, heavy: bool) -> void:
+	var duration := 2.0 if heavy else 0.55
+	effects.append({"at": at, "radius": radius, "time": duration, "duration": duration, "blast": true, "heavy": heavy})
+	var distance := offset_to(camera.global_position, at).length()
+	var falloff := pow(clampf(1.0 - distance / (radius * (12.0 if heavy else 15.0)), 0.0, 1.0), 1.4)
+	shake((32.0 if heavy else 8.0) * falloff, 0.9 if heavy else 0.25)
+
+
+func _build_beam_mesh() -> void:
+	var vertices := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	for section in 41:
+		var x := float(section) / 40.0
+		var taper := 1.0 - smoothstep(0.68, 1.0, x)
+		for side in [-1, 0, 1]:
+			vertices.append(Vector2(x, side * taper))
+			colors.append(Color(1.0, 1.0, 1.0, taper if side == 0 else 0.0))
+		if section < 40:
+			for side in 2:
+				var index := section * 3 + side
+				indices.append_array(PackedInt32Array([index, index + 3, index + 1, index + 1, index + 3, index + 4]))
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_COLOR] = colors
+	arrays[Mesh.ARRAY_INDEX] = indices
+	beam_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 
 func play_sound(name: String) -> void:
@@ -652,7 +864,7 @@ func _build_ui() -> void:
 	title.add_theme_color_override("font_color", Color("77e4e8"))
 	menu_box.add_child(title)
 	var subtitle := Label.new()
-	subtitle.text = "COMBAT SYSTEMS · WEB MVP\nChoose the mission or an isolated test range."
+	subtitle.text = "COMBAT SYSTEMS · WEB MVP\nChoose a mission or combat test range."
 	subtitle.add_theme_color_override("font_color", Color("8baab5"))
 	menu_box.add_child(subtitle)
 	for selected in STAGES:
@@ -681,16 +893,22 @@ func _build_ui() -> void:
 	bottom.add_theme_stylebox_override("panel", _panel_style())
 	hud.add_child(bottom)
 	instructions = Label.new()
-	instructions.text = "W/S thrust/brake   A/D turn   LMB fire   1–6 weapon   Q shield   F stealth   O/P/I sensors\nE EMP   R HACK   TAB module   SHIFT blink   SPACE jump   ESC menu\nV follow/free view   WHEEL zoom   RMB/MMB drag in free view   Click minimap to pan   F1 tests"
+	instructions.text = "W/S thrust/brake   A/D turn   LMB fire   1–6 weapon   Q shield   F stealth   O/P/I sensors\nE EMP   R HACK   TAB module   SHIFT blink   SPACE jump (5s idle)   ESC menu\nV follow/free view   WHEEL zoom   RMB/MMB drag in free view   Click minimap to pan   F1 tests"
 	instructions.add_theme_font_size_override("font_size", 13)
 	instructions.add_theme_color_override("font_color", Color("a7bfca"))
 	bottom.add_child(instructions)
 	message_label = Label.new()
 	message_label.position = Vector2(16, 598)
-	message_label.custom_minimum_size = Vector2(900, 50)
+	message_label.custom_minimum_size = Vector2(974, 50)
+	message_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	message_label.add_theme_font_size_override("font_size", 15)
 	message_label.add_theme_color_override("font_color", Color("ffd58b"))
 	hud.add_child(message_label)
+	objective_label = Label.new()
+	objective_label.position = Vector2(16, 145)
+	objective_label.add_theme_font_size_override("font_size", 15)
+	objective_label.add_theme_color_override("font_color", Color("bce9ed"))
+	hud.add_child(objective_label)
 
 	test_panel = PanelContainer.new()
 	test_panel.position = Vector2(1010, 62)
@@ -720,6 +938,31 @@ func _build_ui() -> void:
 	tactical_overlay = preload("res://tactical_overlay.gd").new()
 	tactical_overlay.game = self
 	hud.add_child(tactical_overlay)
+	result_overlay = Control.new()
+	result_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	result_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.add_child(result_overlay)
+	var shade := ColorRect.new()
+	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	shade.color = Color(0.015, 0.025, 0.04, 0.78)
+	result_overlay.add_child(shade)
+	var result_center := CenterContainer.new()
+	result_center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	result_overlay.add_child(result_center)
+	var result_box := VBoxContainer.new()
+	result_box.add_theme_constant_override("separation", 20)
+	result_center.add_child(result_box)
+	result_title = Label.new()
+	result_title.custom_minimum_size = Vector2(1200, 100)
+	result_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	result_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	result_title.add_theme_font_size_override("font_size", 72)
+	result_box.add_child(result_title)
+	result_hint = Label.new()
+	result_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	result_hint.add_theme_font_size_override("font_size", 16)
+	result_hint.add_theme_color_override("font_color", Color("a7bfca"))
+	result_box.add_child(result_hint)
 
 
 func _test_toggle_stealth() -> void:
@@ -755,6 +998,14 @@ func _test_target_emp() -> void:
 
 func _update_hud() -> void:
 	view_button.text = "%s VIEW  ·  %d%%  [V]" % ["FREE" if free_camera else "FOLLOW", roundi(camera.zoom.x * 100.0)]
+	objective_label.visible = stage == "Sensors & Stealth"
+	match stealth_phase:
+		"escape":
+			objective_label.text = "01 / SILENT EXIT   ·   Stealth + cold coasting beyond the perimeter"
+		"command":
+			objective_label.text = "02 / COMMAND SHIP   ·   Destroy the exposed controller outside the ring"
+		"cleanup":
+			objective_label.text = "03 / CLEANUP   ·   Destroy offline turrets: %d remaining" % _enemies_left()
 
 
 func _draw() -> void:
@@ -787,10 +1038,13 @@ func _draw() -> void:
 			points.append(points[0])
 			draw_polyline(points, Color("31515d"), 1.0)
 	if state != "playing" or not is_instance_valid(player):
+		_draw_effects()
 		return
 	if stage == "Mission" and _enemies_left() == 0:
 		draw_arc(extraction, 75.0, 0.0, TAU, 64, Color("71e8d9"), 3.0)
 		draw_line(extraction + Vector2(-15, 0), extraction + Vector2(15, 0), Color("71e8d9"), 2.0)
+	if stage == "Sensors & Stealth" and stealth_phase == "escape":
+		draw_arc(stealth_center, STEALTH_EXIT_RADIUS, 0.0, TAU, 128, Color("62e7e244"), 2.0, true)
 	if player.has_radar and player.module_ready("radar"):
 		draw_arc(player.global_position, player.radar_radius, 0.0, TAU, 96, Color("225969"), 1.0)
 	if player.has_ir and player.module_ready("ir"):
@@ -805,13 +1059,42 @@ func _draw() -> void:
 		var start := ship.global_position + ship.beam_direction * 28.0
 		var length := ship.beam_direction * ship.beam_length
 		for at in visible_positions(start, length.length()):
-			draw_line(at, at + length, Color("3899bb88"), 7.0 / camera.zoom.x, true)
-			draw_line(at, at + length, Color("b5f2ff"), 2.0 / camera.zoom.x, true)
+			draw_mesh(beam_mesh, null, Transform2D(ship.beam_direction.angle(), Vector2(ship.beam_length, 6.0 / camera.zoom.x), 0.0, at), Color("3899bb88"))
+			draw_mesh(beam_mesh, null, Transform2D(ship.beam_direction.angle(), Vector2(ship.beam_length, 1.5 / camera.zoom.x), 0.0, at), Color("d5f7ff"))
+	_draw_effects()
+
+
+func _draw_effects() -> void:
 	for effect in effects:
 		if effect.has("smoke"):
 			for at in visible_positions(effect.at):
 				draw_circle(at, 4.0 + (0.9 - effect.time) * 18.0, Color(0.55, 0.62, 0.68, effect.time * 0.35))
 			continue
+		if effect.has("blast"):
+			var progress: float = 1.0 - effect.time / effect.duration
+			var fade := 1.0 - progress
+			var wave: float = effect.radius * pow(progress, 0.55) * 1.3
+			var fire: float = effect.radius * 0.42 * sin(PI * minf(progress / 0.75, 1.0))
+			for at in visible_positions(effect.at, effect.radius * 1.3):
+				draw_arc(at, wave, 0.0, TAU, 128, Color(1.0, 0.65, 0.3, fade * fade), 8.0 if effect.heavy else 2.0, true)
+				if effect.heavy:
+					draw_arc(at, wave * 0.82, 0.0, TAU, 128, Color(1.0, 0.87, 0.6, fade * 0.35), 3.0, true)
+				for lobe in 12:
+					var direction := Vector2.from_angle(float(lobe) * TAU / 12.0 + sin(float(lobe) * 7.3) * 0.24)
+					var plume: float = effect.radius * progress * (0.32 + 0.07 * sin(float(lobe) * 4.7))
+					_draw_blast_cloud(at + direction * plume, effect.radius * (0.09 + progress * 0.18), Color(0.18, 0.16, 0.15, sin(PI * progress) * 0.65))
+					var debris: float = wave * (0.55 + 0.3 * sin(float(lobe) * 3.7))
+					draw_line(at + direction * debris, at + direction * (debris + effect.radius * 0.08 * fade), Color(1.0, 0.5, 0.2, fade * fade), 4.0 if effect.heavy else 1.0, true)
+					if fire > 0.0:
+						_draw_blast_cloud(at + direction * fire * 0.45, fire * (0.65 + 0.1 * sin(float(lobe) * 2.3)), Color(1.0, 0.3 + fade * 0.25, 0.08, fade * 0.6))
+				if fire > 0.0:
+					_draw_blast_cloud(at, fire, Color(1.0, 0.72, 0.25, fade * 0.9))
+					_draw_blast_cloud(at, fire * 0.6, Color(1.0, 0.95, 0.8, fade))
+			continue
 		for at in visible_positions(effect.at, effect.radius):
 			draw_arc(at, effect.radius * (1.0 - effect.time / 0.32), 0.0, TAU, 48,
 				Color(effect.color, effect.time / 0.32), 2.0, true)
+
+
+func _draw_blast_cloud(at: Vector2, radius: float, color: Color) -> void:
+	draw_texture_rect(blast_texture, Rect2(at - Vector2.ONE * radius, Vector2.ONE * radius * 2.0), false, color)

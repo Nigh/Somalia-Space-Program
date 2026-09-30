@@ -17,6 +17,7 @@ var stealth_on := false
 var emp_timer := 0.0
 var hack_timer := 0.0
 var weapon := "cannon"
+var torpedo_type := "rapid"
 var loadout := ["bullet", "cannon", "pulse", "beam", "missile", "torpedo"]
 var thrust_input := 0.0
 var turn_input := 0.0
@@ -28,19 +29,22 @@ var pulse_timer := 0.0
 var blink_cooldown := 0.0
 var emp_cooldown := 0.0
 var jump_charge := 0.0
+var jump_charging := false
+var network_shielded := false
+var network_offline := false
 var fire_control_spoof := false
 var ai_enabled := true
 var ai_target: CombatShip
-var visual_radius := 800.0
-var radar_radius := 1100.0
-var ir_radius := 700.0
+var visual_radius := 1500.0
+var radar_radius := 2400.0
+var ir_radius := 1300.0
 var has_optical := true
 var has_radar := true
 var has_ir := true
 var has_fire_control := true
 var sentry := false
 var damage_multiplier := 1.0
-var beam_range := 760.0
+var beam_range := 900.0
 var fire_range := 720.0
 var beam_active := false
 var beam_direction := Vector2.UP
@@ -130,7 +134,7 @@ func _integrate_forces(body: PhysicsDirectBodyState2D) -> void:
 
 
 func module_ready(module: String) -> bool:
-	return emp_timer <= 0.0 and not disabled.has(module) and not overheated.has(module)
+	return not network_offline and emp_timer <= 0.0 and not disabled.has(module) and not overheated.has(module)
 
 
 func spend(module: String, cost: float, generated_heat: float) -> bool:
@@ -144,8 +148,10 @@ func spend(module: String, cost: float, generated_heat: float) -> bool:
 
 
 func take_damage(amount: float, kind: String) -> void:
-	if hp <= 0.0:
+	if hp <= 0.0 or network_shielded:
 		return
+	if player and jump_charging:
+		game.cancel_jump("hull impact")
 	stealth_on = false
 	if shield_on and module_ready("shield") and energy > 0.0:
 		var shield_factor := 0.7 if kind == "energy" else 1.25
@@ -172,13 +178,15 @@ func is_hot() -> bool:
 
 
 func _ai(_delta: float) -> void:
-	if not is_instance_valid(ai_target):
+	if network_offline or not is_instance_valid(ai_target):
 		thrust_input = 0.0
+		turn_input = 0.0
 		fire_input = false
 		return
 	var detected: bool = game.can_detect(self, ai_target)
 	if not detected:
 		thrust_input = 0.0
+		turn_input = 0.0
 		fire_input = false
 		return
 	var offset: Vector2 = game.offset_to(global_position, ai_target.global_position)
@@ -206,10 +214,23 @@ func _draw() -> void:
 
 func _draw_ship() -> void:
 	var color := Color("62e7e2") if player else Color("ff735c")
+	if network_offline:
+		color = Color("617c89")
 	if stealth_on:
 		color.a = 0.45
+	if network_shielded:
+		draw_arc(Vector2.ZERO, 31.0, 0.0, TAU, 48, Color("ac98e6"), 2.0, true)
 	if shield_on:
 		draw_arc(Vector2.ZERO, 28.0, 0.0, TAU, 48, Color("78dfff"), 2.0)
+	if sentry:
+		draw_circle(Vector2.ZERO, 19.0, Color("142d3d"))
+		draw_arc(Vector2.ZERO, 19.0, 0.0, TAU, 32, color, 2.0, true)
+		for angle in [0.0, TAU / 3.0, TAU * 2.0 / 3.0]:
+			var at := Vector2.from_angle(angle) * 19.0
+			draw_line(at * 0.7, at * 1.25, color, 4.0, true)
+		draw_line(Vector2.ZERO, Vector2(0, -26), color, 5.0, true)
+		draw_circle(Vector2.ZERO, 5.0, color)
+		return
 	draw_colored_polygon(PackedVector2Array([Vector2(0, -27), Vector2(17, 17), Vector2(0, 9), Vector2(-17, 17)]), Color("142d3d"))
 	draw_polyline(PackedVector2Array([Vector2(-17, 17), Vector2(0, -27), Vector2(17, 17)]), color, 2.0)
 	draw_line(Vector2(-9, 11), Vector2(9, 11), color, 2.0)
