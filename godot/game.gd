@@ -833,16 +833,21 @@ func _panel_style() -> StyleBoxFlat:
 func _add_button(parent: Node, title: String, action: Callable) -> void:
 	var button := Button.new()
 	button.text = title
-	button.custom_minimum_size = Vector2(0, 28)
-	button.focus_mode = Control.FOCUS_NONE
-	button.add_theme_color_override("font_color", Color("bce9ed"))
+	button.custom_minimum_size = Vector2(0, 44)
+	button.focus_mode = Control.FOCUS_ALL
+	button.add_theme_color_override("font_color", Color("e5f8fa"))
+	button.add_theme_color_override("font_hover_color", Color.WHITE)
 	var style := _panel_style()
-	style.content_margin_top = 4
-	style.content_margin_bottom = 4
+	style.content_margin_top = 9
+	style.content_margin_bottom = 9
 	button.add_theme_stylebox_override("normal", style)
+	var hover := style.duplicate() as StyleBoxFlat
+	hover.bg_color = Color("164350")
+	hover.border_color = Color("77e4e8")
+	button.add_theme_stylebox_override("hover", hover)
+	button.add_theme_stylebox_override("focus", hover)
 	button.pressed.connect(action)
 	parent.add_child(button)
-
 
 func _build_ui() -> void:
 	var layer := CanvasLayer.new()
@@ -852,11 +857,13 @@ func _build_ui() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(root)
 	menu = PanelContainer.new()
-	menu.position = Vector2(58, 52)
+	menu.set_anchors_preset(Control.PRESET_CENTER_LEFT)
+	menu.position = Vector2(58, -245)
 	menu.custom_minimum_size = Vector2(390, 0)
 	menu.add_theme_stylebox_override("panel", _panel_style())
 	root.add_child(menu)
 	var menu_box := VBoxContainer.new()
+	menu_box.add_theme_constant_override("separation", 8)
 	menu.add_child(menu_box)
 	var title := Label.new()
 	title.text = "SOMALIA / SPACE PROGRAM"
@@ -864,9 +871,10 @@ func _build_ui() -> void:
 	title.add_theme_color_override("font_color", Color("77e4e8"))
 	menu_box.add_child(title)
 	var subtitle := Label.new()
-	subtitle.text = "COMBAT SYSTEMS · WEB MVP\nChoose a mission or combat test range."
-	subtitle.add_theme_color_override("font_color", Color("8baab5"))
+	subtitle.text = "COMBAT SYSTEMS  /  MISSION SELECT\nChoose a mission or combat test range."
+	subtitle.add_theme_color_override("font_color", Color("b8d0da"))
 	menu_box.add_child(subtitle)
+	menu_box.add_spacer(false)
 	for selected in STAGES:
 		_add_button(menu_box, selected, func() -> void: start_stage(selected))
 
@@ -875,33 +883,37 @@ func _build_ui() -> void:
 	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(hud)
 	view_button = Button.new()
-	view_button.position = Vector2(650, 14)
-	view_button.size = Vector2(340, 36)
-	view_button.focus_mode = Control.FOCUS_NONE
+	view_button.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	view_button.position = Vector2(-630, 14)
+	view_button.size = Vector2(300, 44)
+	view_button.focus_mode = Control.FOCUS_ALL
 	view_button.pressed.connect(func() -> void: set_free_camera(not free_camera))
 	hud.add_child(view_button)
 	var tests_button := Button.new()
 	tests_button.text = "Test controls [F1]"
-	tests_button.position = Vector2(1010, 14)
-	tests_button.size = Vector2(250, 36)
-	tests_button.focus_mode = Control.FOCUS_NONE
+	tests_button.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	tests_button.position = Vector2(-316, 14)
+	tests_button.size = Vector2(300, 44)
+	tests_button.focus_mode = Control.FOCUS_ALL
 	tests_button.pressed.connect(func() -> void: test_panel.visible = not test_panel.visible)
 	hud.add_child(tests_button)
 	var bottom := PanelContainer.new()
-	bottom.position = Vector2(16, 630)
-	bottom.custom_minimum_size = Vector2(974, 74)
+	bottom.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	bottom.position = Vector2(16, -112)
+	bottom.custom_minimum_size = Vector2(974, 96)
 	bottom.add_theme_stylebox_override("panel", _panel_style())
 	hud.add_child(bottom)
 	instructions = Label.new()
-	instructions.text = "W/S thrust/brake   A/D turn   LMB fire   1–6 weapon   Q shield   F stealth   O/P/I sensors\nE EMP   R HACK   TAB module   SHIFT blink   SPACE jump (5s idle)   ESC menu\nV follow/free view   WHEEL zoom   RMB/MMB drag in free view   Click minimap to pan   F1 tests"
-	instructions.add_theme_font_size_override("font_size", 13)
-	instructions.add_theme_color_override("font_color", Color("a7bfca"))
+	instructions.text = "FLIGHT   W/S thrust/brake  ·  A/D turn  ·  LMB fire  ·  1–6 weapon\nSYSTEMS   Q shield  ·  F stealth  ·  O/P/I sensors  ·  E EMP  ·  R HACK  ·  TAB module\nNAVIGATION   SHIFT blink  ·  SPACE jump (5s idle)  ·  V view  ·  WHEEL zoom  ·  RMB drag  ·  ESC menu"
+	instructions.add_theme_font_size_override("font_size", 14)
+	instructions.add_theme_color_override("font_color", Color("d4e5eb"))
 	bottom.add_child(instructions)
 	message_label = Label.new()
-	message_label.position = Vector2(16, 598)
-	message_label.custom_minimum_size = Vector2(974, 50)
+	message_label.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	message_label.position = Vector2(16, -150)
+	message_label.custom_minimum_size = Vector2(974, 38)
 	message_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	message_label.add_theme_font_size_override("font_size", 15)
+	message_label.add_theme_font_size_override("font_size", 16)
 	message_label.add_theme_color_override("font_color", Color("ffd58b"))
 	hud.add_child(message_label)
 	objective_label = Label.new()
@@ -911,9 +923,9 @@ func _build_ui() -> void:
 	hud.add_child(objective_label)
 
 	test_panel = PanelContainer.new()
-	test_panel.position = Vector2(1010, 62)
+	test_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	test_panel.position = Vector2(-266, 66)
 	test_panel.custom_minimum_size = Vector2(250, 0)
-	test_panel.add_theme_stylebox_override("panel", _panel_style())
 	root.add_child(test_panel)
 	var test_box := VBoxContainer.new()
 	test_panel.add_child(test_box)
@@ -953,11 +965,10 @@ func _build_ui() -> void:
 	result_box.add_theme_constant_override("separation", 20)
 	result_center.add_child(result_box)
 	result_title = Label.new()
-	result_title.custom_minimum_size = Vector2(1200, 100)
+	result_title.custom_minimum_size = Vector2(0, 100)
 	result_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	result_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	result_title.add_theme_font_size_override("font_size", 72)
-	result_box.add_child(result_title)
+	result_title.add_theme_font_size_override("font_size", 60)
 	result_hint = Label.new()
 	result_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	result_hint.add_theme_font_size_override("font_size", 16)

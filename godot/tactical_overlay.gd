@@ -15,9 +15,9 @@ func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	minimap = Control.new()
-	minimap.position = Vector2(1010, 514)
+	minimap.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	minimap.position = Vector2(-270, -206)
 	minimap.size = Vector2(250, 190)
-	minimap.mouse_filter = Control.MOUSE_FILTER_STOP
 	minimap.clip_contents = true
 	minimap.tooltip_text = "V: free view. Click or drag to pan. Cyan: your ship. Red: detected enemy. Gold: torpedo. White box: view."
 	minimap.draw.connect(_draw_minimap)
@@ -31,16 +31,16 @@ func _ready() -> void:
 	add_child(status_panel)
 	for index in 6:
 		var button := Button.new()
-		button.position = Vector2(356 + index * 40, 31)
-		button.size = Vector2(38, 48)
+		button.position = Vector2(350 + index * 42, 30)
+		button.size = Vector2(42, 48)
 		button.toggle_mode = true
-		button.focus_mode = Control.FOCUS_NONE
+		button.focus_mode = Control.FOCUS_ALL
 		button.tooltip_text = "%d: %s" % [index + 1, game.WEAPONS.keys()[index].to_upper()]
-		for state in ["normal", "hover", "pressed", "hover_pressed"]:
+		for state in ["normal", "hover", "pressed", "hover_pressed", "focus"]:
 			var style := StyleBoxFlat.new()
 			style.bg_color = Color("1a535c") if state.contains("pressed") else Color("112c3b")
 			style.border_color = FRIEND if state != "normal" else Color("31515d")
-			style.set_border_width_all(2 if state.contains("pressed") else 1)
+			style.set_border_width_all(2 if state != "normal" else 1)
 			button.add_theme_stylebox_override(state, style)
 		button.pressed.connect(func() -> void:
 			if is_instance_valid(game.player):
@@ -265,11 +265,11 @@ func _draw_status() -> void:
 	var weapon_name: String = game.player.weapon.to_upper()
 	if game.player.weapon == "torpedo":
 		weapon_name = "%s TORPEDO" % game.player.torpedo_type.to_upper()
-	status_panel.draw_string(font, Vector2(356, 20), weapon_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, FRIEND)
+	status_panel.draw_string(font, Vector2(350, 20), weapon_name, HORIZONTAL_ALIGNMENT_LEFT, 248, 14, FRIEND)
 	var condition := "OVERHEATED" if game.player.overheated.has(game.player.weapon) else "LOW POWER" if game.player.energy < 25.0 else "READY"
 	if game.player.emp_timer > 0.0 or game.player.disabled.has("weapons"):
 		condition = "OFFLINE"
-	status_panel.draw_string(font, Vector2(356, 100), condition, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, TORPEDO if condition != "READY" else FRIEND)
+	status_panel.draw_string(font, Vector2(350, 100), condition, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, TORPEDO if condition != "READY" else FRIEND)
 
 
 func _draw_system_icon(icon: Control, index: int) -> void:
@@ -307,7 +307,7 @@ func _draw_system_icon(icon: Control, index: int) -> void:
 
 
 func _draw_meter(title: String, value: float, maximum: float, y: float, color: Color) -> void:
-	status_panel.draw_string(font, Vector2(12, y), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("c6d5dd"))
+	status_panel.draw_string(font, Vector2(12, y), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("d4e5eb"))
 	var filled := clampf(value / maximum, 0.0, 1.0) * 24.0
 	for index in 24:
 		var cell := Rect2(70 + index * 8, y - 12, 6, 14)
@@ -315,12 +315,12 @@ func _draw_meter(title: String, value: float, maximum: float, y: float, color: C
 		cell.size.x *= clampf(filled - index, 0.0, 1.0)
 		if cell.size.x > 0.0:
 			status_panel.draw_rect(cell, color)
-	status_panel.draw_string(font, Vector2(269, y), "%03d/%d" % [maxi(0, roundi(value)), roundi(maximum)], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, color)
+	status_panel.draw_string(font, Vector2(269, y), "%03d/%d" % [maxi(0, roundi(value)), roundi(maximum)], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, color)
 
 
 func _draw_weapon_icon(button: Button, index: int) -> void:
-	var color := FRIEND if button.button_pressed else Color("a7bfca")
-	var center := Vector2(19, 21)
+	var color := FRIEND if button.button_pressed else Color("d4e5eb")
+	var center := Vector2(21, 21)
 	match index:
 		0:
 			for y in [-5, 0, 5]:
